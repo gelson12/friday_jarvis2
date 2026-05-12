@@ -1,0 +1,145 @@
+version: '3.9'
+
+services:
+  # LiveKit Server - The communication backbone
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: friday-livekit
+    ports:
+      - "7880:7880"      # HTTP port for LiveKit API
+      - "7881:7881"      # HTTPS port
+      - "7882:7882"      # WebRTC port
+      - "50000-50100:50000-50100/udp"  # Media ports
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret}
+      LIVEKIT_URL: ws://livekit:7880
+    volumes:
+      - livekit_data:/tmp/livekit
+    networks:
+      - friday-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7880/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Hermes Agent - MCP Server for advanced tasks (Spotify, N8N, etc)
+  hermes-agent:
+    build:
+      context: ./Hermes-agent
+      dockerfile: Dockerfile
+    container_name: friday-hermes
+    environment:
+      # Hermes-specific configuration
+      MCP_SERVER_PORT: 8080
+      LOG_LEVEL: INFO
+      
+      # If Hermes needs external API access
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      
+      # N8N Integration (if applicable)
+      N8N_URL: ${N8N_URL:-http://n8n:5678}
+      N8N_API_KEY: ${N8N_API_KEY}
+      
+      # Spotify Integration
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://localhost:8888/callback}
+      
+      # Database (if Hermes uses one)
+      DATABASE_URL: ${DATABASE_URL}
+    ports:
+      - "8080:8080"  # MCP Server port - accessible to Friday
+    volumes:
+      - ./Hermes-agent:/app
+      - hermes_cache:/app/.cache
+    networks:
+      - friday-network
+    depends_on:
+      - livekit
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Friday Agent - Main AI Assistant (LiveKit Agent)
+  friday-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: friday-jarvis
+    environment:
+      # LiveKit Configuration
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret}
+      
+      # OpenAI Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      
+      # Mem0 Memory System
+      MEM0_API_KEY: ${MEM0_API_KEY}
+      MEM0_API_BASE: ${MEM0_API_BASE:-https://api.mem0.ai}
+      
+      # Google/Gmail Configuration
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      GMAIL_USER: ${GMAIL_USER}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD}
+      
+      # MCP Server Configuration - Points to Hermes Agent
+      N8N_MCP_SERVER_URL: http://hermes-agent:8080
+      
+      # Logging
+      LOG_LEVEL: INFO
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8081:8081"  # Optional: for debugging/health checks
+    depends_on:
+      livekit:
+        condition: service_healthy
+      hermes-agent:
+        condition: service_healthy
+    networks:
+      - friday-network
+    volumes:
+      - ./:/app
+      - friday_cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Optional: N8N Integration Service
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: friday-n8n
+    environment:
+      N8N_HOST: n8n
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      DATABASE_TYPE: sqlite
+      N8N_SECURE_COOKIE: "false"
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - friday-network
+    profiles:
+      - optional  # Only run if explicitly requested: docker-compose --profile optional up
+
+networks:
+  friday-network:
+    driver: bridge
+
+volumes:
+  livekit_data:
+  hermes_cache:
+  friday_cache:
+  n8n_data:
