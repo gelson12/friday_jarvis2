@@ -23,7 +23,7 @@ class Assistant(Agent):
     def __init__(self, chat_ctx=None) -> None:
         super().__init__(
             instructions=AGENT_INSTRUCTION,
-            llm=google.beta.realtime.RealtimeModel (
+            llm=HermesRealtimeAdapter (
                  voice="charon",
              
             ),
