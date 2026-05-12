@@ -24,7 +24,7 @@ class Assistant(Agent):
         super().__init__(
             instructions=AGENT_INSTRUCTION,
             llm=HermesRealtimeAdapter (
-                 voice="charon",
+                 voice="charon"
              
             ),
             tools=[
