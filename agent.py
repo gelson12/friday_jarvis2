@@ -23,7 +23,7 @@ class Assistant(Agent):
         super().__init__(
             instructions=AGENT_INSTRUCTION,
             llm=google.beta.realtime.RealtimeModel (
-                 voice="charon",
+                 voice="charon"
                   temperature=0.8,
              
             ),
