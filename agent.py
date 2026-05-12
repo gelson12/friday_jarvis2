@@ -22,8 +22,9 @@ class Assistant(Agent):
     def __init__(self, chat_ctx=None) -> None:
         super().__init__(
             instructions=AGENT_INSTRUCTION,
-            llm=openai.realtime.RealtimeModel(
-                 voice="sage"
+            llm=google.beta.realtime.RealtimeModel (
+                 voice="charon"
+                  temperature=0.8,
              
             ),
             tools=[
