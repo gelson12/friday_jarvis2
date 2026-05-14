@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.agents import mcp
-from livekit.plugins import openai, silero, noise_cancellation, google
+from livekit.plugins import openai, deepgram, silero, noise_cancellation
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 
 load_dotenv()
@@ -32,21 +32,21 @@ async def entrypoint(ctx: agents.JobContext):
     if n8n_mcp_url:
         mcp_servers.append(mcp.MCPServerHTTP(url=n8n_mcp_url))
 
-    # STT: Try OpenAI first, fallback to Google
+    # STT: Try OpenAI first, fallback to Deepgram
     try:
         stt = openai.STT()
         logger.info("STT: Using OpenAI")
     except Exception as e:
-        logger.warning(f"OpenAI STT failed ({e}), using Google fallback")
-        stt = google.STT()
+        logger.warning(f"OpenAI STT failed ({e}), using Deepgram fallback")
+        stt = deepgram.STT()
 
-    # TTS: Try OpenAI first, fallback to Google
+    # TTS: Try OpenAI first, fallback to Deepgram
     try:
         tts = openai.TTS(voice="nova")
         logger.info("TTS: Using OpenAI")
     except Exception as e:
-        logger.warning(f"OpenAI TTS failed ({e}), using Google fallback")
-        tts = google.TTS()
+        logger.warning(f"OpenAI TTS failed ({e}), using Deepgram fallback")
+        tts = deepgram.TTS()
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
