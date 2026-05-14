@@ -1,6 +1,7 @@
 livekit-agents
 livekit-plugins-openai
 livekit-plugins-deepgram
+livekit-plugins-google
 livekit-plugins-silero
 livekit-plugins-noise-cancellation
 requests
