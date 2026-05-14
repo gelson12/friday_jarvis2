@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.agents import mcp
-from livekit.plugins import openai, silero, noise_cancellation
+from livekit.plugins import openai, silero, noise_cancellation, google
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 
 load_dotenv()
@@ -32,16 +32,32 @@ async def entrypoint(ctx: agents.JobContext):
     if n8n_mcp_url:
         mcp_servers.append(mcp.MCPServerHTTP(url=n8n_mcp_url))
 
+    # STT: Try OpenAI first, fallback to Google
+    try:
+        stt = openai.STT()
+        logger.info("STT: Using OpenAI")
+    except Exception as e:
+        logger.warning(f"OpenAI STT failed ({e}), using Google fallback")
+        stt = google.STT()
+
+    # TTS: Try OpenAI first, fallback to Google
+    try:
+        tts = openai.TTS(voice="nova")
+        logger.info("TTS: Using OpenAI")
+    except Exception as e:
+        logger.warning(f"OpenAI TTS failed ({e}), using Google fallback")
+        tts = google.TTS()
+
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=openai.STT(),
+        stt=stt,
         llm=openai.LLM(
             model="hermes-agent",
             base_url=f"{hermes_url}/v1",
             api_key=hermes_key,
             extra_headers={"X-Hermes-Session-Id": ctx.room.name},
         ),
-        tts=openai.TTS(voice="nova"),
+        tts=tts,
         mcp_servers=mcp_servers,
     )
 
