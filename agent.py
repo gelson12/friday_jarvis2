@@ -2,9 +2,10 @@ import os
 import logging
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import AgentSession, Agent, RoomOptions
 from livekit.agents import mcp
 from livekit.plugins import openai, deepgram, google, silero, noise_cancellation
+from groq_stt_adapter import GroqSTT
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 
 load_dotenv()
@@ -32,23 +33,29 @@ async def entrypoint(ctx: agents.JobContext):
     if n8n_mcp_url:
         mcp_servers.append(mcp.MCPServerHTTP(url=n8n_mcp_url))
 
-    # STT: Try OpenAI → Deepgram → Google Cloud (with runtime fallback)
-    stt_chain = [
-        ("OpenAI", lambda: openai.STT()),
-        ("Deepgram", lambda: deepgram.STT()),
-        ("Google Cloud", lambda: google.STT()),
-    ]
-    stt = None
-    for provider_name, provider_fn in stt_chain:
-        try:
-            stt = provider_fn()
-            logger.info(f"STT: Using {provider_name}")
-            break
-        except Exception as e:
-            logger.warning(f"{provider_name} STT init failed: {e}")
-    if stt is None:
-        logger.error("All STT providers failed!")
-        raise RuntimeError("No STT provider available")
+    # STT: Groq Whisper PRIMARY (unlimited quota, fastest)
+    #      With fallback chain: OpenAI → Deepgram → Google Cloud
+    try:
+        stt = GroqSTT()
+        logger.info("✓ STT: Using Groq Whisper (unlimited quota)")
+    except Exception as e:
+        logger.warning(f"⚠ Groq STT init failed: {e}, trying fallback chain...")
+        stt_chain = [
+            ("OpenAI", lambda: openai.STT()),
+            ("Deepgram", lambda: deepgram.STT()),
+            ("Google Cloud", lambda: google.STT()),
+        ]
+        stt = None
+        for provider_name, provider_fn in stt_chain:
+            try:
+                stt = provider_fn()
+                logger.info(f"STT: Using {provider_name}")
+                break
+            except Exception as e:
+                logger.warning(f"{provider_name} STT init failed: {e}")
+        if stt is None:
+            logger.error("All STT providers failed!")
+            raise RuntimeError("No STT provider available")
 
     # TTS: Try OpenAI → Deepgram → Google Cloud (with runtime fallback)
     tts_chain = [
@@ -84,8 +91,10 @@ async def entrypoint(ctx: agents.JobContext):
     await session.start(
         room=ctx.room,
         agent=Assistant(),
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
+        room_options=RoomOptions(
+            auto_subscribe=True,
+            auto_publish=True,
+            noise_cancellation=noise_cancellation.BVC(),
         ),
     )
 

@@ -7,3 +7,4 @@ livekit-plugins-noise-cancellation
 requests
 python-dotenv
 pydantic-ai-slim[openai,mcp]
+groq>=0.4.0
