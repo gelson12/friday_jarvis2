@@ -5,7 +5,7 @@
     "dockerfile": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python agent.py",
+    "startCommand": "python agent.py start",
     "restartPolicyType": "on_failure",
     "restartPolicyMaxRetries": 5
   }
