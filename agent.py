@@ -32,31 +32,41 @@ async def entrypoint(ctx: agents.JobContext):
     if n8n_mcp_url:
         mcp_servers.append(mcp.MCPServerHTTP(url=n8n_mcp_url))
 
-    # STT: Try OpenAI → Deepgram → Google Cloud
-    try:
-        stt = openai.STT()
-        logger.info("STT: Using OpenAI")
-    except Exception as e:
-        logger.warning(f"OpenAI STT failed ({e}), trying Deepgram")
+    # STT: Try OpenAI → Deepgram → Google Cloud (with runtime fallback)
+    stt_chain = [
+        ("OpenAI", lambda: openai.STT()),
+        ("Deepgram", lambda: deepgram.STT()),
+        ("Google Cloud", lambda: google.STT()),
+    ]
+    stt = None
+    for provider_name, provider_fn in stt_chain:
         try:
-            stt = deepgram.STT()
-            logger.info("STT: Using Deepgram")
-        except Exception as e2:
-            logger.warning(f"Deepgram STT failed ({e2}), using Google Cloud fallback")
-            stt = google.STT()
+            stt = provider_fn()
+            logger.info(f"STT: Using {provider_name}")
+            break
+        except Exception as e:
+            logger.warning(f"{provider_name} STT init failed: {e}")
+    if stt is None:
+        logger.error("All STT providers failed!")
+        raise RuntimeError("No STT provider available")
 
-    # TTS: Try OpenAI → Deepgram → Google Cloud
-    try:
-        tts = openai.TTS(voice="nova")
-        logger.info("TTS: Using OpenAI")
-    except Exception as e:
-        logger.warning(f"OpenAI TTS failed ({e}), trying Deepgram")
+    # TTS: Try OpenAI → Deepgram → Google Cloud (with runtime fallback)
+    tts_chain = [
+        ("OpenAI", lambda: openai.TTS(voice="nova")),
+        ("Deepgram", lambda: deepgram.TTS()),
+        ("Google Cloud", lambda: google.TTS()),
+    ]
+    tts = None
+    for provider_name, provider_fn in tts_chain:
         try:
-            tts = deepgram.TTS()
-            logger.info("TTS: Using Deepgram")
-        except Exception as e2:
-            logger.warning(f"Deepgram TTS failed ({e2}), using Google Cloud fallback")
-            tts = google.TTS()
+            tts = provider_fn()
+            logger.info(f"TTS: Using {provider_name}")
+            break
+        except Exception as e:
+            logger.warning(f"{provider_name} TTS init failed: {e}")
+    if tts is None:
+        logger.error("All TTS providers failed!")
+        raise RuntimeError("No TTS provider available")
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
