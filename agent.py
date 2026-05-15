@@ -2,7 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomOptions
+from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.agents import mcp
 from livekit.plugins import openai, deepgram, google, silero, noise_cancellation
 from groq_stt_adapter import GroqSTT
@@ -91,10 +91,8 @@ async def entrypoint(ctx: agents.JobContext):
     await session.start(
         room=ctx.room,
         agent=Assistant(),
-        room_options=RoomOptions(
-            auto_subscribe=True,
-            auto_publish=True,
-            noise_cancellation=noise_cancellation.BVC(),
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC()
         ),
     )
 
