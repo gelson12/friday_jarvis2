@@ -90,6 +90,14 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
+    # Inject initial synthetic user message to populate session context
+    # This ensures the LLM endpoint receives a non-empty messages array
+    # Prevents "No user message found in messages" HTTP 400 error from Hermes
+    session.chat.messages.append({
+        "role": "user",
+        "content": "Hello"
+    })
+
     await session.generate_reply(instructions=SESSION_INSTRUCTION)
 
 
