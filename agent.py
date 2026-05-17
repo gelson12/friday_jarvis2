@@ -82,6 +82,8 @@ async def entrypoint(ctx: agents.JobContext):
         mcp_servers=mcp_servers,
     )
 
+    # Start the agent session - this handles the conversation loop automatically
+    # The session listens for user input, processes STT, sends to LLM, and streams TTS
     await session.start(
         room=ctx.room,
         agent=Assistant(),
@@ -89,8 +91,6 @@ async def entrypoint(ctx: agents.JobContext):
             noise_cancellation=noise_cancellation.BVC()
         ),
     )
-
-    await session.generate_reply(instructions=SESSION_INSTRUCTION)
 
 
 if __name__ == "__main__":
