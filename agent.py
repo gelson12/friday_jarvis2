@@ -33,10 +33,10 @@ async def entrypoint(ctx: agents.JobContext):
         mcp_servers.append(mcp.MCPServerHTTP(url=n8n_mcp_url))
 
     # STT: Deepgram PRIMARY (free tier, no quota limits)
-    #      Fallback: OpenAI → Google Cloud
+    #      Fallback: Google Cloud ONLY
+    # FORBIDDEN: OpenAI STT (violates INV-10 — no OpenAI API calls)
     stt_chain = [
         ("Deepgram", lambda: deepgram.STT()),
-        ("OpenAI", lambda: openai.STT()),
         ("Google Cloud", lambda: google.STT()),
     ]
     stt = None
@@ -51,11 +51,11 @@ async def entrypoint(ctx: agents.JobContext):
         logger.error("All STT providers failed!")
         raise RuntimeError("No STT provider available")
 
-    # TTS: Try OpenAI → Deepgram → Google Cloud (with runtime fallback)
+    # TTS: Google Cloud PRIMARY → Deepgram FALLBACK
+    # FORBIDDEN: OpenAI TTS (violates INV-10 — no OpenAI API calls)
     tts_chain = [
-        ("OpenAI", lambda: openai.TTS(voice="nova")),
-        ("Deepgram", lambda: deepgram.TTS()),
         ("Google Cloud", lambda: google.TTS()),
+        ("Deepgram", lambda: deepgram.TTS()),
     ]
     tts = None
     for provider_name, provider_fn in tts_chain:
