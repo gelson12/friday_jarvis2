@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.agents import mcp
-from livekit.plugins import openai, deepgram, google, silero, noise_cancellation
+from livekit.plugins import openai, deepgram, silero, noise_cancellation
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 
 load_dotenv()
@@ -51,23 +51,13 @@ async def entrypoint(ctx: agents.JobContext):
         logger.error("All STT providers failed!")
         raise RuntimeError("No STT provider available")
 
-    # TTS: Google Cloud PRIMARY → Deepgram FALLBACK
-    # FORBIDDEN: OpenAI TTS (violates INV-10 — no OpenAI API calls)
-    tts_chain = [
-        ("Google Cloud", lambda: google.TTS()),
-        ("Deepgram", lambda: deepgram.TTS()),
-    ]
-    tts = None
-    for provider_name, provider_fn in tts_chain:
-        try:
-            tts = provider_fn()
-            logger.info(f"TTS: Using {provider_name}")
-            break
-        except Exception as e:
-            logger.warning(f"{provider_name} TTS init failed: {e}")
-    if tts is None:
-        logger.error("All TTS providers failed!")
-        raise RuntimeError("No TTS provider available")
+    # TTS: Deepgram Aura (using existing DEEPGRAM_API_KEY)
+    try:
+        tts = deepgram.TTS()
+        logger.info("✓ TTS: Using Deepgram Aura")
+    except Exception as e:
+        logger.error(f"Deepgram TTS init failed: {e}")
+        raise RuntimeError("TTS provider unavailable")
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
@@ -100,3 +90,4 @@ if __name__ == "__main__":
             prewarm_fnc=prewarm,
         )
     )
+# Force rebuild
