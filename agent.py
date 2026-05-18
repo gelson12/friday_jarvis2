@@ -1,13 +1,90 @@
+import os
+import logging
 from dotenv import load_dotenv
-
 from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions, ChatContext
-from livekit.plugins import (
-    noise_cancellation,
-    openai
-)
-from livekit.plugins import google
+from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import mcp
+from livekit.plugins import openai, deepgram, google, silero, noise_cancellation
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+def prewarm(proc: agents.JobProcess):
+    """Pre-download VAD model once per worker process to avoid cold-start delay."""
+    proc.userdata["vad"] = silero.VAD.load()
+
+
+class Assistant(Agent):
+    def __init__(self):
+        super().__init__(instructions=AGENT_INSTRUCTION)
+
+
+async def entrypoint(ctx: agents.JobContext):
+    await ctx.connect()
+
+    hermes_url = os.environ.get("HERMES_URL", "http://localhost:8642")
+    hermes_key = os.environ.get("HERMES_API_KEY", "no-key")
+    n8n_mcp_url = os.environ.get("N8N_MCP_SERVER_URL", "")
+
+    mcp_servers = []
+    if n8n_mcp_url:
+        mcp_servers.append(mcp.MCPServerHTTP(url=n8n_mcp_url))
+
+    # STT: Deepgram PRIMARY, Google Cloud FALLBACK
+    stt_chain = [
+        ("Deepgram", lambda: deepgram.STT()),
+        ("Google Cloud", lambda: google.STT()),
+    ]
+    stt = None
+    for provider_name, provider_fn in stt_chain:
+        try:
+            stt = provider_fn()
+            logger.info(f"✓ STT: Using {provider_name}")
+            break
+        except Exception as e:
+            logger.warning(f"⚠ {provider_name} STT init failed: {e}")
+    if stt is None:
+        raise RuntimeError("No STT provider available")
+
+    # TTS: Google Cloud only
+    try:
+        tts = google.TTS()
+        logger.info("✓ TTS: Using Google Cloud")
+    except Exception as e:
+        logger.error(f"Google Cloud TTS init failed: {e}")
+        raise RuntimeError("TTS provider unavailable")
+
+    session = AgentSession(
+        vad=ctx.proc.userdata["vad"],
+        stt=stt,
+        llm=openai.LLM(
+            model="hermes-agent",
+            base_url=f"{hermes_url}/v1",
+            api_key=hermes_key,
+            extra_headers={"X-Hermes-Session-Id": ctx.room.name},
+        ),
+        tts=tts,
+        mcp_servers=mcp_servers,
+    )
+
+    await session.start(
+        room=ctx.room,
+        agent=Assistant(),
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC()
+        ),
+    )
+
+
+if __name__ == "__main__":
+    agents.cli.run_app(
+        agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+        )
+    )
 from tools import get_weather, search_web, send_email
 from mem0 import AsyncMemoryClient
 from mcp_client import MCPServerSse
