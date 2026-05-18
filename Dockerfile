@@ -1,6 +1,9 @@
 # Use official Python runtime as base image
 FROM python:3.11-slim
 
+# Force rebuild by invalidating Docker cache on every build
+ARG CACHEBUST=2026-05-18-deepgram-swap-deploy-1
+
 # Set working directory
 WORKDIR /app
 
