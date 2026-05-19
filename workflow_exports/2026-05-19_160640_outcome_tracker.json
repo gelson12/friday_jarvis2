@@ -1,0 +1,517 @@
+{
+  "updatedAt": "2026-05-19T13:44:42.473Z",
+  "createdAt": "2026-04-18T18:29:24.714Z",
+  "id": "BwICylqCcCA22T0f",
+  "name": "Crypto Outcome Tracker",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 4
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "id": "ot01",
+      "position": [
+        0,
+        300
+      ],
+      "type": "n8n-nodes-base.scheduleTrigger"
+    },
+    {
+      "name": "Fetch BTC Price",
+      "position": [
+        200,
+        200
+      ],
+      "id": "ot02",
+      "onError": "continueRegularOutput",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+        "options": {}
+      }
+    },
+    {
+      "type": "n8n-nodes-base.httpRequest",
+      "name": "Read Vault Signals",
+      "onError": "continueRegularOutput",
+      "id": "ot03",
+      "position": [
+        200,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "options": {},
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "48"
+            },
+            {
+              "name": "tag",
+              "value": "crypto_signal"
+            }
+          ]
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "value": "2dc6c69574c14d615ce146e54640aa13030dade7aa86697c",
+              "name": "X-Vault-Secret"
+            }
+          ]
+        },
+        "url": "https://super-agent-production.up.railway.app/memory/export",
+        "sendQuery": true,
+        "sendHeaders": true
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "// ML-01 + ML-03 Integration: ot04 Evaluate Outcomes\n// Tracks IC (ML-01) AND updates Bayesian priors (ML-03) from actual outcomes\n\nfunction _sgNode(name) {\n  try {\n    return $(name).first().json || {};\n  } catch (e) {\n    return {};\n  }\n}\n\nconst tickerRaw = _sgNode('Fetch BTC Price');\nconst tickerResult = tickerRaw && tickerRaw.result ? tickerRaw.result : {};\nconst tickerKey = Object.keys(tickerResult)[0];\nconst ticker = tickerResult[tickerKey] || {};\nconst currentPrice = ticker.c ? parseFloat(ticker.c[0]) : 0;\n\nconst vaultRaw = _sgNode('Read Vault Signals');\nconst memories = (vaultRaw && vaultRaw.memories) ? vaultRaw.memories : [];\n\nlet correct = 0, incorrect = 0, neutral = 0, evaluated = 0;\nconst outcomes = [];\nconst gradeable = [];\nconst outcomesByRegime = {};\n\n// Parse vault signals and grade outcomes\nfor (const mem of memories) {\n  const content = mem.content || '';\n  const dirMatch = content.match(/TRADE SIGNAL[^:]*:\\s*(BUY|SELL|WAIT)/);\n  const priceMatch = content.match(/@\\s*\\$(\\d+(?:\\.\\d+)?)/);\n  const confMatch = content.match(/Conf:\\s*([\\d.]+)%/);\n  const regimeMatch = content.match(/Regime:(\\w+)/);\n\n  if (!dirMatch || !priceMatch) continue;\n\n  const dir = dirMatch[1];\n  const signalPrice = parseFloat(priceMatch[1]);\n  const conf = confMatch ? parseFloat(confMatch[1]) : 0;\n  const regime = regimeMatch ? regimeMatch[1] : 'UNKNOWN';\n\n  if (dir === 'WAIT') {\n    neutral++;\n    evaluated++;\n    continue;\n  }\n\n  if (currentPrice === 0 || signalPrice === 0) continue;\n\n  const pctMove = ((currentPrice - signalPrice) / signalPrice) * 100;\n  let outcome;\n\n  if (Math.abs(pctMove) < 0.3) {\n    outcome = 'TOO_SOON';\n  } else if (dir === 'BUY' && pctMove > 0) {\n    outcome = 'CORRECT';\n    correct++;\n  } else if (dir === 'SELL' && pctMove < 0) {\n    outcome = 'CORRECT';\n    correct++;\n  } else {\n    outcome = 'INCORRECT';\n    incorrect++;\n  }\n\n  evaluated++;\n  const outcomeObj = {\n    dir,\n    signalPrice,\n    currentPrice: Math.round(currentPrice),\n    pctMove: Math.round(pctMove * 100) / 100,\n    conf,\n    outcome,\n    regime\n  };\n  outcomes.push(outcomeObj);\n  gradeable.push(outcomeObj);\n\n  // Track outcomes by regime for prior updates (ML-03)\n  if (!outcomesByRegime[regime]) {\n    outcomesByRegime[regime] = { outcomes: [], correct: 0, total: 0 };\n  }\n  outcomesByRegime[regime].outcomes.push(outcomeObj);\n  outcomesByRegime[regime].total++;\n  if (outcome === 'CORRECT') {\n    outcomesByRegime[regime].correct++;\n  }\n}\n\n// ============================================================================\n// ML-01: INFORMATION COEFFICIENT CALCULATION\n// ============================================================================\n\nfunction spearmanIC(pairs) {\n  if (pairs.length < 3) return 0;\n\n  const confRanked = pairs\n    .map((p, i) => ({ idx: i, val: p.confidence }))\n    .sort((a, b) => a.val - b.val)\n    .map((p, rank) => ({ idx: p.idx, rank }));\n\n  const returnRanked = pairs\n    .map((p, i) => ({ idx: i, val: p.return }))\n    .sort((a, b) => a.val - b.val)\n    .map((p, rank) => ({ idx: p.idx, rank }));\n\n  const diffs = confRanked.map(c => {\n    const returnRank = returnRanked.find(r => r.idx === c.idx).rank;\n    return (c.rank - returnRank) ** 2;\n  });\n\n  const sumD2 = diffs.reduce((a, b) => a + b, 0);\n  const n = pairs.length;\n  const rho = 1 - (6 * sumD2) / (n * (n * n - 1));\n  return rho;\n}\n\nconst icPairs = gradeable.map(o => ({\n  confidence: o.conf,\n  return: o.outcome === 'CORRECT' ? 1 : 0\n}));\n\nconst ic = spearmanIC(icPairs);\nconst icBps = Math.round(ic * 1000) / 10;\n\nconst icInterpretation =\n  ic > 0.05 ? 'EXCELLENT_EDGE' :\n  ic > 0.02 ? 'GOOD_INVESTABLE' :\n  ic > 0.0 ? 'WEAK_POSITIVE' :\n  ic > -0.02 ? 'NO_CORRELATION' :\n  'NEGATIVE_CORRELATION';\n\nconst icHistory = ($getWorkflowStaticData('ic_history') || {});\nconst historyKey = `ic_${new Date().toISOString().slice(0, 10)}`;\n\nif (!icHistory[historyKey]) {\n  icHistory[historyKey] = [];\n}\nicHistory[historyKey].push(ic);\n\nif (icHistory[historyKey].length > 10) {\n  icHistory[historyKey] = icHistory[historyKey].slice(-10);\n}\n\n$setWorkflowStaticData('ic_history', icHistory);\n\nconst recentIC = icHistory[historyKey].slice(-4);\nconst allWeak = recentIC.length === 4 && recentIC.every(x => x < 0.02);\nlet demotionFlag = false;\n\nif (gradeable.length >= 10) {\n  if (allWeak || ic < -0.02) {\n    demotionFlag = true;\n  }\n}\n\n// ============================================================================\n// ML-03: BAYESIAN PRIOR UPDATES (Laplace Smoothing)\n// ============================================================================\n// Update priors based on actual win rates per regime\n// Formula: P_new = (wins + \u03b1) / (total + 2\u03b1) where \u03b1=1\n\nconst LAPLACE_ALPHA = 1;\n\n// Read existing priors from static data\nconst ml03Data = $getWorkflowStaticData('ml03_bayesian_priors') || {};\nlet priorUpdates = {};\nlet updateCount = 0;\n\n// For each regime with outcomes, calculate updated prior\nfor (const regime in outcomesByRegime) {\n  const regimeData = outcomesByRegime[regime];\n  if (regimeData.total >= 10) {\n    // Only update if sufficient sample (10+ trades for this regime)\n    const newPrior = (regimeData.correct + LAPLACE_ALPHA) / (regimeData.total + 2 * LAPLACE_ALPHA);\n    priorUpdates[regime] = {\n      prior: Math.round(newPrior * 10000) / 10000,\n      winRate: regimeData.correct / regimeData.total,\n      samples: regimeData.total,\n      correctCount: regimeData.correct\n    };\n    updateCount++;\n    console.log(`[ML-03] Updated ${regime}: ${regimeData.correct}/${regimeData.total} correct \u2192 prior=${newPrior.toFixed(4)}`);\n  }\n}\n\n// Store all priors (learned + defaults)\nconst defaultPriors = {\n  BULL_TREND_STRONG:0.72,\n  BULL_TREND_WEAK:0.60,\n  BEAR_TREND_STRONG:0.28,\n  BEAR_TREND_WEAK:0.40,\n  RANGE_BOUND:0.50,\n  BREAKOUT_BULL:0.68,\n  BREAKOUT_BEAR:0.32,\n  HIGH_VOL_EXPAND:0.50,\n  LOW_VOL_COMPRESS:0.50,\n  RISK_ON:0.65,\n  RISK_OFF:0.38,\n  EXTREME_CAUTION:0.42\n};\n\nconst allPriors = Object.assign({}, defaultPriors);\nfor (const regime in priorUpdates) {\n  allPriors[regime] = priorUpdates[regime].prior;\n}\n\n// Save updated priors to static data\nif (updateCount > 0) {\n  ml03Data.priors = allPriors;\n  ml03Data.lastUpdate = new Date().toISOString();\n  ml03Data.sampleCount = (ml03Data.sampleCount || 0) + gradeable.length;\n  ml03Data.regimeUpdates = priorUpdates;\n  $setWorkflowStaticData('ml03_bayesian_priors', ml03Data);\n  console.log(`[ML-03] Persisted ${updateCount} regime priors to static data`);\n}\n\n// ============================================================================\n// BUILD OUTPUT\n// ============================================================================\n\nconst total = correct + incorrect;\nconst avgConf = outcomes.length > 0 ? Math.round((outcomes.reduce((s, o) => s + o.conf, 0) / outcomes.length) * 10) / 10 : 0;\n\nconst summary = `OUTCOME REPORT | ${new Date().toISOString().slice(0, 16)}Z\nBTC @ $${Math.round(currentPrice)}\nSignals evaluated: ${evaluated} | Correct: ${correct} | Incorrect: ${incorrect} | Neutral: ${neutral}\nHit Rate: ${total > 0 ? Math.round((correct / total) * 100) : 0}% | Avg Confidence: ${avgConf}%\nIC: ${icBps} bps (${icInterpretation}) | ML-03: ${updateCount} regime(s) updated`;\n\nreturn [\n  {\n    json: {\n      summary,\n      hitRate: total > 0 ? Math.round((correct / total) * 100) : 0,\n      correct,\n      incorrect,\n      neutral,\n      evaluated,\n      currentPrice,\n      avgConf,\n      outcomes: outcomes.slice(0, 10),\n      // ML-01: IC Metrics\n      ic: Math.round(ic * 10000) / 10000,\n      icBps,\n      icInterpretation,\n      icHistory: icHistory[historyKey] || [],\n      demotionTriggered: demotionFlag,\n      // ML-03: Prior Updates\n      ml03UpdateCount: updateCount,\n      ml03RegimeUpdates: priorUpdates,\n      ml03AllPriors: allPriors,\n      ml03SampleCount: ml03Data.sampleCount || 0\n    }\n  }\n];\n"
+      },
+      "position": [
+        400,
+        300
+      ],
+      "id": "ot04",
+      "name": "Evaluate Outcomes",
+      "type": "n8n-nodes-base.code"
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Vault-Secret",
+              "value": "2dc6c69574c14d615ce146e54640aa13030dade7aa86697c"
+            }
+          ]
+        },
+        "url": "https://super-agent-production.up.railway.app/memory/ingest",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "value": "={{ $json.summary }}",
+              "name": "content"
+            },
+            {
+              "name": "tags",
+              "value": "[\"crypto_outcome\",\"performance\"]"
+            },
+            {
+              "value": "outcome_tracker",
+              "name": "source"
+            }
+          ]
+        },
+        "options": {},
+        "method": "POST"
+      },
+      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.httpRequest",
+      "onError": "continueRegularOutput",
+      "id": "ot05",
+      "position": [
+        600,
+        200
+      ],
+      "name": "Write Outcome to Vault"
+    },
+    {
+      "parameters": {
+        "additionalFields": {
+          "parse_mode": "HTML"
+        },
+        "operation": "sendMessage",
+        "resource": "message",
+        "chatId": "6275020593",
+        "text": "={{ '<b>\u00f0\u009f\u0093\u008a CRYPTO PERFORMANCE UPDATE</b>\\n\\n' + $json.summary + '\\n\\n<i>Hit rate threshold for live trading: 55%+</i>' }}"
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "vaWr2cxS1Q9HsYd4",
+          "name": "Telegram account"
+        }
+      },
+      "typeVersion": 1.2,
+      "type": "n8n-nodes-base.telegram",
+      "name": "Telegram Performance",
+      "position": [
+        600,
+        400
+      ],
+      "id": "ot06",
+      "webhookId": "ff4f9165-1cf2-4295-a271-eab961fe07db"
+    }
+  ],
+  "connections": {
+    "Fetch BTC Price": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "type": "main",
+            "node": "Evaluate Outcomes"
+          }
+        ]
+      ]
+    },
+    "Evaluate Outcomes": {
+      "main": [
+        [
+          {
+            "node": "Write Outcome to Vault",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram Performance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Vault Signals": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Outcomes",
+            "index": 0,
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "type": "main",
+            "index": 0,
+            "node": "Fetch BTC Price"
+          },
+          {
+            "type": "main",
+            "index": 0,
+            "node": "Read Vault Signals"
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": {
+    "node:Schedule Trigger": {
+      "recurrenceRules": [
+        16
+      ]
+    }
+  },
+  "meta": null,
+  "pinData": null,
+  "versionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+  "activeVersionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+  "versionCounter": 49,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-04-18T18:29:24.714Z",
+      "createdAt": "2026-04-18T18:29:24.714Z",
+      "role": "workflow:owner",
+      "workflowId": "BwICylqCcCA22T0f",
+      "projectId": "Lrgt6JR85OZiVLcX",
+      "project": {
+        "updatedAt": "2026-03-31T09:07:31.366Z",
+        "createdAt": "2026-03-31T08:57:43.789Z",
+        "id": "Lrgt6JR85OZiVLcX",
+        "name": "gelson mascarenhas <gelson_m@hotmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "09977cda-9140-4e68-a948-e88d1f400c18"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-05-19T13:44:42.482Z",
+    "createdAt": "2026-05-19T13:44:42.482Z",
+    "versionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+    "workflowId": "BwICylqCcCA22T0f",
+    "nodes": [
+      {
+        "typeVersion": 1.2,
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 4
+              }
+            ]
+          }
+        },
+        "name": "Schedule Trigger",
+        "id": "ot01",
+        "position": [
+          0,
+          300
+        ],
+        "type": "n8n-nodes-base.scheduleTrigger"
+      },
+      {
+        "name": "Fetch BTC Price",
+        "position": [
+          200,
+          200
+        ],
+        "id": "ot02",
+        "onError": "continueRegularOutput",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "parameters": {
+          "method": "GET",
+          "url": "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+          "options": {}
+        }
+      },
+      {
+        "type": "n8n-nodes-base.httpRequest",
+        "name": "Read Vault Signals",
+        "onError": "continueRegularOutput",
+        "id": "ot03",
+        "position": [
+          200,
+          400
+        ],
+        "parameters": {
+          "method": "GET",
+          "options": {},
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "limit",
+                "value": "48"
+              },
+              {
+                "name": "tag",
+                "value": "crypto_signal"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "value": "2dc6c69574c14d615ce146e54640aa13030dade7aa86697c",
+                "name": "X-Vault-Secret"
+              }
+            ]
+          },
+          "url": "https://super-agent-production.up.railway.app/memory/export",
+          "sendQuery": true,
+          "sendHeaders": true
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "typeVersion": 2,
+        "parameters": {
+          "jsCode": "// ML-01 + ML-03 Integration: ot04 Evaluate Outcomes\n// Tracks IC (ML-01) AND updates Bayesian priors (ML-03) from actual outcomes\n\nfunction _sgNode(name) {\n  try {\n    return $(name).first().json || {};\n  } catch (e) {\n    return {};\n  }\n}\n\nconst tickerRaw = _sgNode('Fetch BTC Price');\nconst tickerResult = tickerRaw && tickerRaw.result ? tickerRaw.result : {};\nconst tickerKey = Object.keys(tickerResult)[0];\nconst ticker = tickerResult[tickerKey] || {};\nconst currentPrice = ticker.c ? parseFloat(ticker.c[0]) : 0;\n\nconst vaultRaw = _sgNode('Read Vault Signals');\nconst memories = (vaultRaw && vaultRaw.memories) ? vaultRaw.memories : [];\n\nlet correct = 0, incorrect = 0, neutral = 0, evaluated = 0;\nconst outcomes = [];\nconst gradeable = [];\nconst outcomesByRegime = {};\n\n// Parse vault signals and grade outcomes\nfor (const mem of memories) {\n  const content = mem.content || '';\n  const dirMatch = content.match(/TRADE SIGNAL[^:]*:\\s*(BUY|SELL|WAIT)/);\n  const priceMatch = content.match(/@\\s*\\$(\\d+(?:\\.\\d+)?)/);\n  const confMatch = content.match(/Conf:\\s*([\\d.]+)%/);\n  const regimeMatch = content.match(/Regime:(\\w+)/);\n\n  if (!dirMatch || !priceMatch) continue;\n\n  const dir = dirMatch[1];\n  const signalPrice = parseFloat(priceMatch[1]);\n  const conf = confMatch ? parseFloat(confMatch[1]) : 0;\n  const regime = regimeMatch ? regimeMatch[1] : 'UNKNOWN';\n\n  if (dir === 'WAIT') {\n    neutral++;\n    evaluated++;\n    continue;\n  }\n\n  if (currentPrice === 0 || signalPrice === 0) continue;\n\n  const pctMove = ((currentPrice - signalPrice) / signalPrice) * 100;\n  let outcome;\n\n  if (Math.abs(pctMove) < 0.3) {\n    outcome = 'TOO_SOON';\n  } else if (dir === 'BUY' && pctMove > 0) {\n    outcome = 'CORRECT';\n    correct++;\n  } else if (dir === 'SELL' && pctMove < 0) {\n    outcome = 'CORRECT';\n    correct++;\n  } else {\n    outcome = 'INCORRECT';\n    incorrect++;\n  }\n\n  evaluated++;\n  const outcomeObj = {\n    dir,\n    signalPrice,\n    currentPrice: Math.round(currentPrice),\n    pctMove: Math.round(pctMove * 100) / 100,\n    conf,\n    outcome,\n    regime\n  };\n  outcomes.push(outcomeObj);\n  gradeable.push(outcomeObj);\n\n  // Track outcomes by regime for prior updates (ML-03)\n  if (!outcomesByRegime[regime]) {\n    outcomesByRegime[regime] = { outcomes: [], correct: 0, total: 0 };\n  }\n  outcomesByRegime[regime].outcomes.push(outcomeObj);\n  outcomesByRegime[regime].total++;\n  if (outcome === 'CORRECT') {\n    outcomesByRegime[regime].correct++;\n  }\n}\n\n// ============================================================================\n// ML-01: INFORMATION COEFFICIENT CALCULATION\n// ============================================================================\n\nfunction spearmanIC(pairs) {\n  if (pairs.length < 3) return 0;\n\n  const confRanked = pairs\n    .map((p, i) => ({ idx: i, val: p.confidence }))\n    .sort((a, b) => a.val - b.val)\n    .map((p, rank) => ({ idx: p.idx, rank }));\n\n  const returnRanked = pairs\n    .map((p, i) => ({ idx: i, val: p.return }))\n    .sort((a, b) => a.val - b.val)\n    .map((p, rank) => ({ idx: p.idx, rank }));\n\n  const diffs = confRanked.map(c => {\n    const returnRank = returnRanked.find(r => r.idx === c.idx).rank;\n    return (c.rank - returnRank) ** 2;\n  });\n\n  const sumD2 = diffs.reduce((a, b) => a + b, 0);\n  const n = pairs.length;\n  const rho = 1 - (6 * sumD2) / (n * (n * n - 1));\n  return rho;\n}\n\nconst icPairs = gradeable.map(o => ({\n  confidence: o.conf,\n  return: o.outcome === 'CORRECT' ? 1 : 0\n}));\n\nconst ic = spearmanIC(icPairs);\nconst icBps = Math.round(ic * 1000) / 10;\n\nconst icInterpretation =\n  ic > 0.05 ? 'EXCELLENT_EDGE' :\n  ic > 0.02 ? 'GOOD_INVESTABLE' :\n  ic > 0.0 ? 'WEAK_POSITIVE' :\n  ic > -0.02 ? 'NO_CORRELATION' :\n  'NEGATIVE_CORRELATION';\n\nconst icHistory = ($getWorkflowStaticData('ic_history') || {});\nconst historyKey = `ic_${new Date().toISOString().slice(0, 10)}`;\n\nif (!icHistory[historyKey]) {\n  icHistory[historyKey] = [];\n}\nicHistory[historyKey].push(ic);\n\nif (icHistory[historyKey].length > 10) {\n  icHistory[historyKey] = icHistory[historyKey].slice(-10);\n}\n\n$setWorkflowStaticData('ic_history', icHistory);\n\nconst recentIC = icHistory[historyKey].slice(-4);\nconst allWeak = recentIC.length === 4 && recentIC.every(x => x < 0.02);\nlet demotionFlag = false;\n\nif (gradeable.length >= 10) {\n  if (allWeak || ic < -0.02) {\n    demotionFlag = true;\n  }\n}\n\n// ============================================================================\n// ML-03: BAYESIAN PRIOR UPDATES (Laplace Smoothing)\n// ============================================================================\n// Update priors based on actual win rates per regime\n// Formula: P_new = (wins + \u03b1) / (total + 2\u03b1) where \u03b1=1\n\nconst LAPLACE_ALPHA = 1;\n\n// Read existing priors from static data\nconst ml03Data = $getWorkflowStaticData('ml03_bayesian_priors') || {};\nlet priorUpdates = {};\nlet updateCount = 0;\n\n// For each regime with outcomes, calculate updated prior\nfor (const regime in outcomesByRegime) {\n  const regimeData = outcomesByRegime[regime];\n  if (regimeData.total >= 10) {\n    // Only update if sufficient sample (10+ trades for this regime)\n    const newPrior = (regimeData.correct + LAPLACE_ALPHA) / (regimeData.total + 2 * LAPLACE_ALPHA);\n    priorUpdates[regime] = {\n      prior: Math.round(newPrior * 10000) / 10000,\n      winRate: regimeData.correct / regimeData.total,\n      samples: regimeData.total,\n      correctCount: regimeData.correct\n    };\n    updateCount++;\n    console.log(`[ML-03] Updated ${regime}: ${regimeData.correct}/${regimeData.total} correct \u2192 prior=${newPrior.toFixed(4)}`);\n  }\n}\n\n// Store all priors (learned + defaults)\nconst defaultPriors = {\n  BULL_TREND_STRONG:0.72,\n  BULL_TREND_WEAK:0.60,\n  BEAR_TREND_STRONG:0.28,\n  BEAR_TREND_WEAK:0.40,\n  RANGE_BOUND:0.50,\n  BREAKOUT_BULL:0.68,\n  BREAKOUT_BEAR:0.32,\n  HIGH_VOL_EXPAND:0.50,\n  LOW_VOL_COMPRESS:0.50,\n  RISK_ON:0.65,\n  RISK_OFF:0.38,\n  EXTREME_CAUTION:0.42\n};\n\nconst allPriors = Object.assign({}, defaultPriors);\nfor (const regime in priorUpdates) {\n  allPriors[regime] = priorUpdates[regime].prior;\n}\n\n// Save updated priors to static data\nif (updateCount > 0) {\n  ml03Data.priors = allPriors;\n  ml03Data.lastUpdate = new Date().toISOString();\n  ml03Data.sampleCount = (ml03Data.sampleCount || 0) + gradeable.length;\n  ml03Data.regimeUpdates = priorUpdates;\n  $setWorkflowStaticData('ml03_bayesian_priors', ml03Data);\n  console.log(`[ML-03] Persisted ${updateCount} regime priors to static data`);\n}\n\n// ============================================================================\n// BUILD OUTPUT\n// ============================================================================\n\nconst total = correct + incorrect;\nconst avgConf = outcomes.length > 0 ? Math.round((outcomes.reduce((s, o) => s + o.conf, 0) / outcomes.length) * 10) / 10 : 0;\n\nconst summary = `OUTCOME REPORT | ${new Date().toISOString().slice(0, 16)}Z\nBTC @ $${Math.round(currentPrice)}\nSignals evaluated: ${evaluated} | Correct: ${correct} | Incorrect: ${incorrect} | Neutral: ${neutral}\nHit Rate: ${total > 0 ? Math.round((correct / total) * 100) : 0}% | Avg Confidence: ${avgConf}%\nIC: ${icBps} bps (${icInterpretation}) | ML-03: ${updateCount} regime(s) updated`;\n\nreturn [\n  {\n    json: {\n      summary,\n      hitRate: total > 0 ? Math.round((correct / total) * 100) : 0,\n      correct,\n      incorrect,\n      neutral,\n      evaluated,\n      currentPrice,\n      avgConf,\n      outcomes: outcomes.slice(0, 10),\n      // ML-01: IC Metrics\n      ic: Math.round(ic * 10000) / 10000,\n      icBps,\n      icInterpretation,\n      icHistory: icHistory[historyKey] || [],\n      demotionTriggered: demotionFlag,\n      // ML-03: Prior Updates\n      ml03UpdateCount: updateCount,\n      ml03RegimeUpdates: priorUpdates,\n      ml03AllPriors: allPriors,\n      ml03SampleCount: ml03Data.sampleCount || 0\n    }\n  }\n];\n"
+        },
+        "position": [
+          400,
+          300
+        ],
+        "id": "ot04",
+        "name": "Evaluate Outcomes",
+        "type": "n8n-nodes-base.code"
+      },
+      {
+        "parameters": {
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Vault-Secret",
+                "value": "2dc6c69574c14d615ce146e54640aa13030dade7aa86697c"
+              }
+            ]
+          },
+          "url": "https://super-agent-production.up.railway.app/memory/ingest",
+          "sendBody": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "value": "={{ $json.summary }}",
+                "name": "content"
+              },
+              {
+                "name": "tags",
+                "value": "[\"crypto_outcome\",\"performance\"]"
+              },
+              {
+                "value": "outcome_tracker",
+                "name": "source"
+              }
+            ]
+          },
+          "options": {},
+          "method": "POST"
+        },
+        "typeVersion": 4.2,
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "id": "ot05",
+        "position": [
+          600,
+          200
+        ],
+        "name": "Write Outcome to Vault"
+      },
+      {
+        "parameters": {
+          "additionalFields": {
+            "parse_mode": "HTML"
+          },
+          "operation": "sendMessage",
+          "resource": "message",
+          "chatId": "6275020593",
+          "text": "={{ '<b>\u00f0\u009f\u0093\u008a CRYPTO PERFORMANCE UPDATE</b>\\n\\n' + $json.summary + '\\n\\n<i>Hit rate threshold for live trading: 55%+</i>' }}"
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "vaWr2cxS1Q9HsYd4",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2,
+        "type": "n8n-nodes-base.telegram",
+        "name": "Telegram Performance",
+        "position": [
+          600,
+          400
+        ],
+        "id": "ot06",
+        "webhookId": "ff4f9165-1cf2-4295-a271-eab961fe07db"
+      }
+    ],
+    "connections": {
+      "Fetch BTC Price": {
+        "main": [
+          [
+            {
+              "index": 0,
+              "type": "main",
+              "node": "Evaluate Outcomes"
+            }
+          ]
+        ]
+      },
+      "Evaluate Outcomes": {
+        "main": [
+          [
+            {
+              "node": "Write Outcome to Vault",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Telegram Performance",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Vault Signals": {
+        "main": [
+          [
+            {
+              "node": "Evaluate Outcomes",
+              "index": 0,
+              "type": "main"
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "type": "main",
+              "index": 0,
+              "node": "Fetch BTC Price"
+            },
+            {
+              "type": "main",
+              "index": 0,
+              "node": "Read Vault Signals"
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "gelson mascarenhas",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-19T13:44:45.813Z",
+        "id": 2399,
+        "workflowId": "BwICylqCcCA22T0f",
+        "versionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+        "event": "deactivated",
+        "userId": "09977cda-9140-4e68-a948-e88d1f400c18"
+      },
+      {
+        "createdAt": "2026-05-19T13:44:45.889Z",
+        "id": 2400,
+        "workflowId": "BwICylqCcCA22T0f",
+        "versionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+        "event": "activated",
+        "userId": "09977cda-9140-4e68-a948-e88d1f400c18"
+      },
+      {
+        "createdAt": "2026-05-19T13:44:42.638Z",
+        "id": 2395,
+        "workflowId": "BwICylqCcCA22T0f",
+        "versionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+        "event": "deactivated",
+        "userId": "09977cda-9140-4e68-a948-e88d1f400c18"
+      },
+      {
+        "createdAt": "2026-05-19T13:44:42.717Z",
+        "id": 2396,
+        "workflowId": "BwICylqCcCA22T0f",
+        "versionId": "b95ac0a1-0bb1-44d9-8268-3a6958eb5cae",
+        "event": "activated",
+        "userId": "09977cda-9140-4e68-a948-e88d1f400c18"
+      }
+    ]
+  }
+}
