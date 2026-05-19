@@ -1,0 +1,9 @@
+# Force LF in working trees on all platforms. Prettier (this project's
+# default endOfLine) and the `next build` lint gate require LF; without
+# this, Windows checkouts get CRLF and the build fails.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.otf binary

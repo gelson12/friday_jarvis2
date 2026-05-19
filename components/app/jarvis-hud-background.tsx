@@ -4,11 +4,7 @@
 export function JarvisHudBackground() {
   return (
     <div aria-hidden className="jarvis-hud" data-jarvis-hud>
-      <svg
-        className="jarvis-hud-svg"
-        viewBox="0 0 1000 1000"
-        preserveAspectRatio="xMidYMid slice"
-      >
+      <svg className="jarvis-hud-svg" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid slice">
         <defs>
           <radialGradient id="hud-glow" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stopColor="#3CDFFF" stopOpacity="0.30" />
@@ -19,12 +15,7 @@ export function JarvisHudBackground() {
 
         <rect width="1000" height="1000" fill="url(#hud-glow)" />
 
-        <g
-          stroke="#3CDFFF"
-          fill="none"
-          strokeWidth="1.5"
-          transform="translate(500 500)"
-        >
+        <g stroke="#3CDFFF" fill="none" strokeWidth="1.5" transform="translate(500 500)">
           <g className="hud-spin-cw">
             <circle r="430" strokeOpacity="0.25" strokeDasharray="2 14" />
             <circle r="360" strokeOpacity="0.35" strokeDasharray="60 28" />
@@ -39,12 +30,7 @@ export function JarvisHudBackground() {
             <circle r="170" strokeOpacity="0.5" strokeDasharray="4 10" />
           </g>
           <circle r="90" stroke="#EAFBFF" strokeOpacity="0.4" />
-          <circle
-            className="hud-pulse"
-            r="48"
-            fill="#3CDFFF"
-            stroke="none"
-          />
+          <circle className="hud-pulse" r="48" fill="#3CDFFF" stroke="none" />
         </g>
       </svg>
 
