@@ -1,5 +1,7 @@
 # 🧠 Friday - Your Personal AI Assistant - Part 2
 
+> 🌿 **You are on `main`** — the **Google Cloud TTS** variant. The only functional difference from the [`br` branch](https://github.com/gelson12/friday_jarvis2/tree/br) is one line of code (`google.TTS()` vs `deepgram.TTS()`). Neither branch uses Gemini; the LLM on both is **Hermes**. Custom Next.js UI lives on the [`LiveKit` branch](https://github.com/gelson12/friday_jarvis2/tree/LiveKit). Deep-dive comparison: **[BRANCH_COMPARISON.md (on `br`)](https://github.com/gelson12/friday_jarvis2/blob/br/BRANCH_COMPARISON.md)**.
+
 This is a Python-based AI assistant inspired by *Jarvis*, capable of:
 
 - 🔍 Searching the web  
