@@ -49,13 +49,26 @@ async def entrypoint(ctx: agents.JobContext):
     if stt is None:
         raise RuntimeError("No STT provider available")
 
-    # TTS: Google Cloud only
-    try:
-        tts = google.TTS()
-        logger.info("✓ TTS: Using Google Cloud")
-    except Exception as e:
-        logger.error(f"Google Cloud TTS init failed: {e}")
-        raise RuntimeError("TTS provider unavailable")
+    # TTS: Deepgram Aura PRIMARY (uses the SAME DEEPGRAM_API_KEY as STT),
+    # Google Cloud FALLBACK (requires GOOGLE_APPLICATION_CREDENTIALS_JSON
+    # on the Railway service — currently NOT set, so Google fails at the
+    # first synthesize call). Aura's voice quality is on par with Google
+    # for the British-Jarvis tone and avoids the auth gap that has been
+    # silencing Jarvis to date.
+    tts_chain = [
+        ("Deepgram Aura", lambda: deepgram.TTS()),
+        ("Google Cloud", lambda: google.TTS()),
+    ]
+    tts = None
+    for provider_name, provider_fn in tts_chain:
+        try:
+            tts = provider_fn()
+            logger.info(f"✓ TTS: Using {provider_name}")
+            break
+        except Exception as e:
+            logger.warning(f"⚠ {provider_name} TTS init failed: {e}")
+    if tts is None:
+        raise RuntimeError("No TTS provider available")
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
@@ -89,6 +102,10 @@ async def entrypoint(ctx: agents.JobContext):
             try:
                 text = (await reader.read_all() or "").strip()
                 if text:
+                    logger.info(
+                        "lk.agent.request from %s: %r",
+                        participant_identity, text[:200],
+                    )
                     session.generate_reply(user_input=text)
             except Exception:
                 logger.exception("lk.agent.request handler failed")
