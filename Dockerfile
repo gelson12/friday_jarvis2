@@ -36,6 +36,12 @@ RUN pnpm build
 # ── Stage 2: combined Python + Node runtime ─────────────────────────
 FROM python:3.11-slim AS runtime
 
+# Cache-bust: change this value to force Railway/buildkit to re-run all
+# subsequent layers when it would otherwise reuse a stale cached image.
+# (Bump the timestamp whenever the pipeline appears stuck on an old build.)
+ARG CACHEBUST=2026-05-20T16:30
+RUN echo "cache bust ${CACHEBUST}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -81,12 +87,15 @@ RUN chmod +x start.sh
 
 EXPOSE 3000
 
-# tini as PID 1 → forwards SIGTERM cleanly to start.sh, start.sh forwards
-# to both child processes. No zombie processes; clean Railway restarts.
+# Launcher inlined directly into ENTRYPOINT so the dual-process startup
+# does NOT depend on start.sh being copied/exec-bit/line-ending correct
+# (we've been chasing a phantom where start.sh's output never appears in
+# Railway logs — this side-steps every possible cause).
 #
-# start.sh is part of ENTRYPOINT (not CMD) so Railway's "Custom Start
-# Command" dashboard field — which overrides CMD — cannot bypass the
-# dual-process launcher. Any args it appends become $@ to start.sh,
-# which the launcher ignores.
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/start.sh"]
+# tini PID 1 → bash -c → starts both processes with `set -m` job control
+# so SIGTERM/SIGINT propagate. exits non-zero when either dies so Railway
+# restarts the container.
+#
+# start.sh is preserved on disk as a reference / local-dev launcher.
+ENTRYPOINT ["/usr/bin/tini", "--", "/bin/bash", "-c", "set -m; echo '[entrypoint] starting LiveKit worker (agent.py)'; python /app/agent.py start & WORKER_PID=$!; echo \"[entrypoint] starting Friday UI on :${PORT:-3000}\"; ( cd /app/frontend && PORT=\"${PORT:-3000}\" HOSTNAME=0.0.0.0 node server.js ) & UI_PID=$!; trap 'kill -TERM $WORKER_PID $UI_PID 2>/dev/null || true' SIGTERM SIGINT; wait -n $WORKER_PID $UI_PID; EXIT=$?; echo \"[entrypoint] one process exited (code $EXIT) — shutting down\"; kill -TERM $WORKER_PID $UI_PID 2>/dev/null || true; exit $EXIT"]
 CMD []
