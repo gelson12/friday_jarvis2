@@ -1,6 +1,8 @@
-# Agent Starter for React
+# Friday — Custom LiveKit UI
 
-This is a starter template for [LiveKit Agents](https://docs.livekit.io/agents) that provides a simple voice interface using [Agents UI](https://livekit.io/ui) components and [LiveKit JavaScript SDK](https://github.com/livekit/client-sdk-js). It supports [voice](https://docs.livekit.io/agents/start/voice-ai), [transcriptions](https://docs.livekit.io/agents/build/text/), and [virtual avatars](https://docs.livekit.io/agents/integrations/avatar).
+> 🤖 **Branch role:** this is the **face** half (Next.js custom UI for the Jarvis/Friday voice agent). The **voice** (Python agent worker) lives on the [`br` branch](https://github.com/gelson12/friday_jarvis2/tree/br). For a deep-dive on the differences see **[BRANCH_COMPARISON.md](./BRANCH_COMPARISON.md)**.
+
+Based on LiveKit's [`agent-starter-react`](https://github.com/livekit-examples/agent-starter-react) template — a simple voice interface using [Agents UI](https://livekit.io/ui) components and the [LiveKit JavaScript SDK](https://github.com/livekit/client-sdk-js). Supports [voice](https://docs.livekit.io/agents/start/voice-ai), [transcriptions](https://docs.livekit.io/agents/build/text/), and [virtual avatars](https://docs.livekit.io/agents/integrations/avatar).
 
 Also available for:
 [Android](https://github.com/livekit-examples/agent-starter-android) • [Flutter](https://github.com/livekit-examples/agent-starter-flutter) • [Swift](https://github.com/livekit-examples/agent-starter-swift) • [React Native](https://github.com/livekit-examples/agent-starter-react-native)
