@@ -1,0 +1,5 @@
+# Force LF line endings for shell scripts so they keep working when the
+# repo is committed from Windows and then executed inside a Linux
+# container. CRLF would prepend `\r` to the shebang/commands and the
+# script would fail with "/usr/bin/env bash\r: No such file or directory".
+*.sh text eol=lf

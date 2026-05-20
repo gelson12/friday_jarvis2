@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+.next
+out
+build
+coverage
+*.md
+.env*
+!.env.example
+.vercel
+.DS_Store
+npm-debug.log*
+.pnpm-debug.log*
