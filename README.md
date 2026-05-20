@@ -1,5 +1,7 @@
 # 🧠 Friday - Your Personal AI Assistant - Part 2
 
+> 🤖 **Branch role:** this is the **voice** half. The **face** (custom Next.js UI) lives on the [`LiveKit` branch](https://github.com/gelson12/friday_jarvis2/tree/LiveKit). For a deep-dive on the differences see **[BRANCH_COMPARISON.md](./BRANCH_COMPARISON.md)**.
+
 This is a Python-based AI assistant inspired by *Jarvis*, capable of:
 
 - 🔍 Searching the web  
