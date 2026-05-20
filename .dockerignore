@@ -1,41 +1,43 @@
-# Git
+# ─── Git ─────────────────────────────────────────────────────────
 .git
 .gitignore
 .gitattributes
+.github/
 
-# Python
-__pycache__
+# ─── Python build artefacts (everywhere) ─────────────────────────
+__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
 .pytest_cache/
 .coverage
+
+# ─── Python local venvs (everywhere) ─────────────────────────────
+venv/
+env/
+ENV/
+.venv/
+**/venv/
+**/.venv/
+
+# ─── Node / Next.js build artefacts (rebuilt fresh in stage 1) ───
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+npm-debug.log
+
+# ─── Local env / secrets (Railway provides at runtime) ───────────
 .env
 .env.local
+.env.*.local
+.env.example
 
-# IDE
+# ─── IDE / OS noise ──────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
@@ -43,30 +45,31 @@ MANIFEST
 *~
 .DS_Store
 
-# Documentation
-docs/
+# ─── Documentation (none of it ships in the image) ───────────────
 *.md
 LICENSE
+docs/
 
-# CI/CD
-.github/
-.gitlab-ci.yml
-.travis.yml
-
-# Testing
+# ─── Tests (worker has no runtime tests) ─────────────────────────
 test_*.py
 tests/
 
-# Node (if any)
-node_modules/
-npm-debug.log
-
-# Docker
+# ─── Docker / CI files (not needed inside the container) ─────────
 Dockerfile
 docker-compose.yml
 .dockerignore
+.gitlab-ci.yml
+.travis.yml
 
-# Misc
+# ─── Sibling sandbox / debug folders that ship in this repo
+#     but never run inside the container.
+desktop-mcp-server/
+friday_jarvis2/
+workflow_exports/
+
+# ─── Claude / project-memory state ───────────────────────────────
+.claude/
+
+# ─── Misc ────────────────────────────────────────────────────────
 *.log
 *.pot
-.env.example

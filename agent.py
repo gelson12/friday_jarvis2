@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from dotenv import load_dotenv
 from livekit import agents
@@ -76,6 +77,30 @@ async def entrypoint(ctx: agents.JobContext):
             noise_cancellation=noise_cancellation.BVC()
         ),
     )
+
+    # Bridge the JS UI's `lk.agent.request` text-stream topic into the
+    # agent. The agent-starter-react chat box publishes typed messages
+    # there; livekit-agents only auto-handles `lk.chat`, so we wire the
+    # extra topic ourselves and feed it through session.generate_reply()
+    # — the same entry point voice uses. Without this the worker logs
+    # "ignoring text stream with topic 'lk.agent.request'" on every type.
+    def _on_agent_request(reader, participant_identity: str) -> None:
+        async def _process() -> None:
+            try:
+                text = (await reader.read_all() or "").strip()
+                if text:
+                    session.generate_reply(user_input=text)
+            except Exception:
+                logger.exception("lk.agent.request handler failed")
+        asyncio.create_task(_process())
+
+    try:
+        ctx.room.register_text_stream_handler(
+            "lk.agent.request", _on_agent_request
+        )
+    except ValueError:
+        # Already registered (e.g. on a hot reload) — fine.
+        pass
 
 
 if __name__ == "__main__":
