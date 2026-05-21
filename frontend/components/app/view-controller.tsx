@@ -6,6 +6,7 @@ import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { AgentSessionView_01 } from '@/components/agents-ui/blocks/agent-session-view-01';
 import { WelcomeView } from '@/components/app/welcome-view';
+import { useWakeWord } from '@/hooks/useWakeWord';
 
 const MotionWelcomeView = motion.create(WelcomeView);
 const MotionSessionView = motion.create(AgentSessionView_01);
@@ -35,6 +36,16 @@ interface ViewControllerProps {
 export function ViewController({ appConfig }: ViewControllerProps) {
   const { isConnected, start } = useSessionContext();
   const { resolvedTheme } = useTheme();
+
+  // Hands-free activation: while disconnected, listen for "Hey Friday" /
+  // "Friday" and start the session without a button press. Disarms the
+  // moment the session connects, releasing the mic before LiveKit grabs it.
+  useWakeWord({
+    enabled: !isConnected,
+    onWake: () => {
+      void start();
+    },
+  });
 
   return (
     <AnimatePresence mode="wait">

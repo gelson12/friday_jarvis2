@@ -37,6 +37,10 @@ export const WelcomeView = ({
         >
           {startButtonText}
         </Button>
+
+        <p className="text-muted-foreground mt-3 text-xs">
+          or just say &ldquo;Hey Friday&rdquo;
+        </p>
       </section>
     </div>
   );
