@@ -1371,22 +1371,39 @@ class Assistant(Agent):
         await self._push_browser_frame()
 
     async def open_browser(self, url: str = "https://www.google.com") -> str:
-        """Open a live, interactive web browser on the JARVIS screen.
+        """Open or navigate the live browser, reusing the session when possible.
 
-        It is a real Chromium page — the user can click links, scroll,
-        type, and enter a new address in the widget itself.
+        Returns immediately — Playwright runs in a background task so the
+        voice turn does not stall ~5–15s waiting for Chromium to launch
+        (which previously made Friday feel frozen).
 
         Args:
-            url: The page to open. Defaults to Google.
+            url: The page to load. If a browser is already up this just
+                navigates it (no relaunch). If the URL is empty / default
+                and one is already open, asks where to go instead of
+                stacking a second empty window on top.
         """
+        target = (url or "").strip()
+        is_default = target in ("", "https://www.google.com")
+
+        # Reuse path — never relaunch Chromium when a browser is already up.
+        if self._browser is not None:
+            await self._publish_ui({"type": "focus_widget", "kind": "browser"})
+            if is_default:
+                return (
+                    "The browser is already up, sir — "
+                    "where would you like to go?"
+                )
+            # Background-navigate so the voice turn ends fast.
+            asyncio.create_task(self._browser.navigate(target))
+            return f"Going to {target}, sir."
+
+        # Fresh open — kick Playwright off in the background.
         from browser_view import BrowserSession
 
-        await self._stop_browser()
         browser = BrowserSession()
-        try:
-            await browser.open(url)
-        except Exception as exc:  # noqa: BLE001
-            return f"I couldn't open the browser, sir: {exc}"
+        # Claim the slot BEFORE awaiting so a concurrent call sees the
+        # session and takes the reuse path instead of double-launching.
         self._browser = browser
         await self._publish_ui(
             {
@@ -1396,8 +1413,27 @@ class Assistant(Agent):
                 "payload": {"loading": True},
             }
         )
-        self._browser_task = asyncio.create_task(self._browser_stream_loop())
-        return f"The browser is open, sir — loading {url}."
+        self._browser_task = asyncio.create_task(
+            self._open_and_stream(browser, target or "https://www.google.com")
+        )
+        if is_default:
+            return "Opening the browser, sir."
+        return f"Opening the browser to {target}, sir."
+
+    async def _open_and_stream(self, browser, url: str) -> None:
+        """Background: load the page in Chromium, then stream frames."""
+        try:
+            await browser.open(url)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("browser open failed: %s", exc)
+            if self._browser is browser:
+                self._browser = None
+            try:
+                await browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        await self._browser_stream_loop()
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         """Wake/sleep gate, then vision injection.
