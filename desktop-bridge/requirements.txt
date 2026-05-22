@@ -1,3 +1,12 @@
 livekit>=0.18
 livekit-api>=0.8
 python-dotenv>=1.0
+# System volume — precise absolute get/set + mute. Optional; bridge.py
+# falls back to the OS media keys if these are absent.
+pycaw>=20240210
+comtypes>=1.2
+# Diagnostics (system_status, list_processes, close_app).
+psutil>=5.9
+# Recycle-bin delete (recoverable). Optional; bridge.py falls back to a
+# PowerShell Microsoft.VisualBasic.FileIO delete if missing.
+send2trash>=1.8
