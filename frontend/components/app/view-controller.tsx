@@ -1,12 +1,12 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import { useTheme } from 'next-themes';
 import { AnimatePresence, motion } from 'motion/react';
 import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { AgentSessionView_01 } from '@/components/agents-ui/blocks/agent-session-view-01';
 import { WelcomeView } from '@/components/app/welcome-view';
-import { useWakeWord } from '@/hooks/useWakeWord';
 
 const MotionWelcomeView = motion.create(WelcomeView);
 const MotionSessionView = motion.create(AgentSessionView_01);
@@ -37,15 +37,16 @@ export function ViewController({ appConfig }: ViewControllerProps) {
   const { isConnected, start } = useSessionContext();
   const { resolvedTheme } = useTheme();
 
-  // Hands-free activation: while disconnected, listen for "Hey Friday" /
-  // "Friday" and start the session without a button press. Disarms the
-  // moment the session connects, releasing the mic before LiveKit grabs it.
-  useWakeWord({
-    enabled: !isConnected,
-    onWake: () => {
-      void start();
-    },
-  });
+  // Auto-connect on page load — no button click. The browser asks for
+  // mic permission once (LiveKit WebRTC init); after the first Allow it
+  // is automatic on every visit. Wake/sleep ("Hey Friday" / "goodbye
+  // Friday") is gated server-side in the worker, not in the browser.
+  const startedRef = useRef(false);
+  useEffect(() => {
+    if (startedRef.current || isConnected) return;
+    startedRef.current = true;
+    void start();
+  }, [isConnected, start]);
 
   return (
     <AnimatePresence mode="wait">

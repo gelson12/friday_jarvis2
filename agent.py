@@ -8,7 +8,13 @@ import asyncio
 import logging
 from dotenv import load_dotenv
 from livekit import agents, rtc, api
-from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool
+from livekit.agents import (
+    AgentSession,
+    Agent,
+    RoomInputOptions,
+    function_tool,
+    StopResponse,
+)
 from livekit.agents import mcp
 from livekit.agents.utils.images import encode, EncodeOptions, ResizeOptions
 from livekit.plugins import openai, deepgram, google, silero, noise_cancellation
@@ -22,6 +28,16 @@ logger = logging.getLogger(__name__)
 def prewarm(proc: agents.JobProcess):
     """Pre-download VAD model once per worker process to avoid cold-start delay."""
     proc.userdata["vad"] = silero.VAD.load()
+
+
+# ── Wake / sleep ─────────────────────────────────────────────────────
+# The session auto-connects, so the worker is always listening. It stays
+# DORMANT (silent, ignores speech) until it hears the wake phrase, and
+# returns to dormant on the sleep phrase. Gating happens in
+# on_user_turn_completed via `raise StopResponse()` (verified: livekit-
+# agents 1.5.8 catches it and skips the turn).
+_WAKE_RE = re.compile(r"\b(hey\s+|ok\s+|okay\s+)?friday\b", re.I)
+_SLEEP_RE = re.compile(r"\bgood\s?bye,?\s+friday\b", re.I)
 
 
 # ── Vision (camera + screen-share) ───────────────────────────────────
@@ -234,11 +250,15 @@ class Assistant(Agent):
         super().__init__(instructions=AGENT_INSTRUCTION)
         self._room = room
         self._desktop = DesktopBridge()
+        # Wake/sleep: dormant on connect, woken by "Hey Friday".
+        self._awake = False
         # Latest frame + capture time per source.
         self._cam_frame: rtc.VideoFrame | None = None
         self._cam_at: float = 0.0
         self._screen_frame: rtc.VideoFrame | None = None
         self._screen_at: float = 0.0
+        self._seen_cam = False
+        self._seen_screen = False
         self._video_tasks: set[asyncio.Task] = set()
         self._wire_video(room)
 
@@ -248,14 +268,25 @@ class Assistant(Agent):
 
         async def _consume(track: rtc.VideoTrack, source) -> None:  # noqa: ANN001
             stream = rtc.VideoStream(track)
+            is_screen = source == rtc.TrackSource.SOURCE_SCREENSHARE
+            logger.info(
+                "video: subscribed to %s track",
+                "screen-share" if is_screen else "camera",
+            )
             try:
                 async for ev in stream:
-                    if source == rtc.TrackSource.SOURCE_SCREENSHARE:
+                    if is_screen:
                         self._screen_frame = ev.frame
                         self._screen_at = time.time()
+                        if not self._seen_screen:
+                            self._seen_screen = True
+                            logger.info("video: first screen-share frame received")
                     else:
                         self._cam_frame = ev.frame
                         self._cam_at = time.time()
+                        if not self._seen_cam:
+                            self._seen_cam = True
+                            logger.info("video: first camera frame received")
             finally:
                 await stream.aclose()
 
@@ -379,8 +410,36 @@ class Assistant(Agent):
         return " | ".join(parts)
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
-        """On a vision phrase, inject a frame description into the turn."""
+        """Wake/sleep gate, then vision injection.
+
+        The session is always connected, so this fires on every spoken
+        turn. While DORMANT we ignore everything except the wake phrase;
+        `raise StopResponse()` cleanly drops the turn (no LLM reply).
+        """
         text = getattr(new_message, "text_content", "") or ""
+
+        # ── Wake / sleep state machine ───────────────────────────────
+        if not self._awake:
+            if _WAKE_RE.search(text):
+                self._awake = True
+                rest = _WAKE_RE.sub("", text).strip(" ,.!?-")
+                if len(rest.split()) >= 2:
+                    # "Hey Friday, what's the time" — answer the question.
+                    new_message.content = [rest]
+                    text = rest
+                else:
+                    await self.session.say("Yes, sir?")
+                    raise StopResponse()
+            else:
+                # Dormant — ignore all non-wake speech silently.
+                raise StopResponse()
+        else:
+            if _SLEEP_RE.search(text):
+                self._awake = False
+                await self.session.say("Goodbye, sir.")
+                raise StopResponse()
+
+        # ── Vision injection (only runs while awake) ─────────────────
         if not _is_vision_intent(text):
             return
 
@@ -469,7 +528,10 @@ async def entrypoint(ctx: agents.JobContext):
         room=ctx.room,
         agent=Assistant(ctx.room),
         room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
+            noise_cancellation=noise_cancellation.BVC(),
+            # Required for the worker to receive the user's camera and
+            # screen-share tracks (default is off → no video reaches us).
+            video_enabled=True,
         ),
     )
 

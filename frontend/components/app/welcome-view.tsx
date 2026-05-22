@@ -39,7 +39,7 @@ export const WelcomeView = ({
         </Button>
 
         <p className="text-muted-foreground mt-3 text-xs">
-          or just say &ldquo;Hey Friday&rdquo;
+          connecting&hellip; then say &ldquo;Hey Friday&rdquo; to begin
         </p>
       </section>
     </div>
