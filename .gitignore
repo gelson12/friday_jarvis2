@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+desktop-bridge/venv/
+
+# Environment / secrets — never commit
+.env
+*.env
+
+# Local debug artifacts
+_intent_check.py

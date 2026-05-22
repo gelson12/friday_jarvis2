@@ -7,3 +7,5 @@ livekit-plugins-noise-cancellation
 requests
 python-dotenv
 pydantic-ai-slim[openai,mcp]
+httpx
+playwright

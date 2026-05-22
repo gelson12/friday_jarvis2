@@ -20,6 +20,7 @@ from livekit.agents.utils.images import encode, EncodeOptions, ResizeOptions
 from livekit.plugins import openai, deepgram, google, silero, noise_cancellation
 from openai import AsyncOpenAI
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
+import search_tools
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -63,6 +64,147 @@ _SCREEN_RE = re.compile(
 _CAMERA_RE = re.compile(
     r"\b(camera|webcam|me\b|my face|the room|wearing|holding)\b", re.I
 )
+
+
+# ── Screen widgets (floating HUD panels) ─────────────────────────────
+# The browser renders draggable, semi-transparent widget panels. The
+# worker summons them by publishing a JSON command on the `jarvis-ui`
+# data topic in the *user's* room (not the desktop-control room).
+_UI_TOPIC = "jarvis-ui"
+_UI_OPEN_RE = re.compile(
+    r"\b(open|show|bring up|display|pop up|put up|launch)\b", re.I
+)
+_UI_CLOSE_RE = re.compile(
+    r"\b(close|hide|dismiss|get rid of|take down)\b", re.I
+)
+# Widget kind → regex of words the user might use for it.
+_WIDGET_WORDS: dict[str, str] = {
+    "chat": r"chat|conversation|transcript|messages?",
+    "music": r"music|spotify|player|songs?",
+    "news": r"news|headlines",
+    "youtube": r"youtube|videos?",
+    "maps": r"maps?|directions|navigation",
+    "search": r"search|google",
+    "apps": r"apps?|services|programs?|launcher",
+    "system": r"system|diagnostics",
+    "clock": r"clock|chronometer",
+}
+
+
+def _widget_from_text(text: str) -> str | None:
+    """Return the widget kind named in ``text``, or None."""
+    for kind, pattern in _WIDGET_WORDS.items():
+        if re.search(rf"\b(?:{pattern})\b", text, re.I):
+            return kind
+    return None
+
+
+# ── Content intents (search / video / news / maps / live browser) ────
+# The voice LLM does not reliably emit tool calls — it tends to just
+# chat — so the web_search / search_youtube / show_news / show_map /
+# open_browser tools often never fire. We instead detect these intents
+# with a regex on the user's turn (the same approach the wake-word and
+# widget handlers use) and call the matching method directly.
+_BROWSER_RE = re.compile(
+    r"\b(?:open|launch|start|bring up)\b[^.]*\bbrowser\b|\bopen chrome\b", re.I
+)
+_URL_RE = re.compile(
+    r"\b(?:go to|browse to|navigate to|open)\s+"
+    r"((?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[^\s,]*)", re.I
+)
+_YOUTUBE_RE = re.compile(r"\byoutube\b|\bvideos?\s+(?:of|about|for)\b", re.I)
+_NEWS_RE = re.compile(r"\b(?:news|headlines)\b", re.I)
+_MAP_RE = re.compile(r"\b(?:maps?|directions?)\b", re.I)
+_WEBSEARCH_RE = re.compile(
+    r"\b(?:search\s+(?:the\s+)?(?:web|internet|google)|google|look\s+up|"
+    r"web\s+search|search\s+for)\b", re.I
+)
+# An explicit "put it on screen" verb. The bare nouns `news`/`maps` match
+# far too eagerly ("any news on my project" should be answered, not turned
+# into a news panel), so those two intents additionally require this verb.
+_CONTENT_VERB = re.compile(
+    r"\b(show|open|bring up|pull up|display|get me|give me|pop up|put up|"
+    r"launch|see)\b", re.I
+)
+
+
+# Lead / filler / command words stripped to recover the bare query from a
+# spoken request like "can you play a video of cars on youtube".
+_QUERY_NOISE = re.compile(
+    r"\b(?:hey |ok |okay )?friday\b"
+    r"|\b(?:can|could|would|will)\s+you\b|\bplease\b|\bfor me\b"
+    r"|\bi\s+(?:want|need|wanna)(?:\s+to|\s+you\s+to)?\b"
+    r"|\bi'?d\s+like(?:\s+to|\s+you\s+to)?\b"
+    r"|\b(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up"
+    r"|web\s+search(?:\s+for)?|find(?:\s+me)?|show(?:\s+me)?|bring\s+up"
+    r"|pull\s+up|put\s+up|open|play|get\s+me|display|watch|see)\b"
+    r"|\bon\s+(?:the\s+)?(?:web|internet)\b|\bonline\b",
+    re.I,
+)
+
+
+def _clean_query(text: str) -> str:
+    """Strip command / filler words to recover the bare search query."""
+    q = " " + (text or "") + " "
+    prev = None
+    while prev != q:
+        prev = q
+        q = _QUERY_NOISE.sub(" ", q)
+    q = re.sub(r"\s+", " ", q).strip(" ,.?!-\"'")
+    # Drop a dangling leading article left after the command word is gone
+    # ("play a video of cars" -> "a cars" -> "cars").
+    q = re.sub(r"^(?:a|an|the|some|my)\b\s*", "", q, flags=re.I)
+    return q
+
+
+def _content_intent(text: str):
+    """Detect a HUD content intent. Returns ``(kind, arg)`` or ``None``.
+
+    kind ∈ {browser, youtube, news, maps, web}; ``arg`` is the query/URL
+    ('' is allowed for browser and news, where it is optional).
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+
+    url = _URL_RE.search(t)
+    if _BROWSER_RE.search(low):
+        return ("browser", url.group(1) if url else "")
+    if url:
+        return ("browser", url.group(1))
+
+    if _YOUTUBE_RE.search(low):
+        # The query can sit either side of "youtube" ("cars on youtube",
+        # "youtube for cars"), so strip every youtube/video marker and the
+        # command words wrapping it — what is left is the query itself.
+        q = re.sub(r"\b(?:on|from|in|via|over\s+on)\s+youtube\b", " ", t, flags=re.I)
+        q = re.sub(r"\byoutube\b", " ", q, flags=re.I)
+        q = re.sub(r"\b(?:videos?|clips?|footage)\s+(?:of|about|for|on|with)\b",
+                   " ", q, flags=re.I)
+        q = re.sub(r"\b(?:videos?|clips?|footage)\b", " ", q, flags=re.I)
+        return ("youtube", _clean_query(q))
+
+    if _NEWS_RE.search(low) and (_CONTENT_VERB.search(low) or "headlines" in low):
+        q = re.sub(r"\b(?:news|headlines)\b|\b(?:about|on|regarding)\b",
+                   " ", t, flags=re.I)
+        return ("news", _clean_query(q))
+
+    if _MAP_RE.search(low) and (
+        _CONTENT_VERB.search(low)
+        or re.search(r"\b(?:directions?\s+to|map\s+of|navigate\s+to|where\s+is)\b",
+                     low)
+    ):
+        q = re.sub(r"\b(?:google\s+)?maps?\b|\bnavigation\b", " ", t, flags=re.I)
+        q = _clean_query(q)
+        q = re.sub(r"^(?:of|to|for|the)\s+", "", q, flags=re.I).strip()
+        return ("maps", q)
+
+    if _WEBSEARCH_RE.search(low):
+        return ("web", _clean_query(t))
+
+    return None
+
 
 _VISION_MODEL = os.environ.get(
     "OPENJARVIS_VISION_MODEL", "google/gemini-2.0-flash-001"
@@ -245,6 +387,118 @@ def _norm_machine(machine: str) -> str:
     return "laptop"  # default — covers 'laptop', 'desktop', 'pc', '' etc.
 
 
+# ── Desktop control intent (regex fallback) ──────────────────────────
+# The desktop-control @function_tools (open_on_machine, …) only fire if
+# the voice LLM emits a tool call, which it does not do reliably. This
+# regex fallback detects an explicit desktop request on the user's turn
+# and drives the DesktopBridge directly. An explicit "on my laptop / on
+# the rog" clause is required so ordinary conversation never reaches the
+# user's machines by accident.
+_DESKTOP_MACHINE_RE = re.compile(
+    r"\bon\s+(?:my\s+|the\s+)?(laptop|rog|pc|desktop|computer|machine)\b", re.I
+)
+_DESKTOP_OPEN_RE = re.compile(r"\b(open|launch|start)\b", re.I)
+
+# Spoken folder names → a path the desktop-bridge resolves via
+# os.path.expanduser/expandvars. "list my downloads folder" -> "~\Downloads".
+_KNOWN_DIRS = {
+    "downloads": "~\\Downloads", "download": "~\\Downloads",
+    "desktop": "~\\Desktop",
+    "documents": "~\\Documents", "document": "~\\Documents",
+    "pictures": "~\\Pictures", "picture": "~\\Pictures",
+    "videos": "~\\Videos", "video": "~\\Videos",
+    "music": "~\\Music",
+    "home folder": "~", "home directory": "~", "user folder": "~",
+}
+# An explicit path: drive (C:\...), ~/..., %VAR%..., or a UNC \\share.
+_EXPLICIT_PATH_RE = re.compile(
+    r"([a-zA-Z]:\\[^\s,]*|[~%][^\s,]*|\\\\[^\s,]+)"
+)
+
+
+def _desktop_path(text: str) -> str:
+    """Best-effort file/folder path from a spoken request.
+
+    Order: an explicit path, then a known Windows folder name, then the
+    bare word before "folder"/"directory".
+    """
+    m = _EXPLICIT_PATH_RE.search(text)
+    if m:
+        return m.group(1)
+    low = text.lower()
+    for word, path in _KNOWN_DIRS.items():
+        if re.search(rf"\b{re.escape(word)}\b", low):
+            return path
+    m = re.search(r"\b([\w.\-]+)\s+(?:folder|directory|dir)\b", text, re.I)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _desktop_intent(text: str):
+    """Detect a desktop-control intent. Returns ``(machine, cmd, args)`` or None.
+
+    Requires an explicit "on my laptop / on the rog" clause so ordinary
+    conversation never reaches the user's machines by accident.
+    """
+    if not text:
+        return None
+    m = _DESKTOP_MACHINE_RE.search(text)
+    if not m:
+        return None
+    machine = _norm_machine(m.group(1))
+    # Drop the "on my laptop" clause so it isn't mistaken for a path/target.
+    body = _DESKTOP_MACHINE_RE.sub(" ", text)
+    low = body.lower()
+    path = _desktop_path(body)
+
+    if re.search(r"\b(run|execute)\b", low) and "command" in low:
+        cmd = re.sub(r"^.*?\bcommand\b[:\s]*", "", body, flags=re.I)
+        cmd = cmd.strip(" ,.!?-\"'")
+        return (machine, "shell", {"command": cmd}) if cmd else None
+    if re.search(r"\bread\b", low) and re.search(r"\bfile\b|\.\w{1,5}\b", low):
+        return (machine, "read_file", {"path": path}) if path else None
+    if path and re.search(
+        r"\b(list|show|see|browse|what'?s|files?|folder|directory|contents)\b",
+        low,
+    ):
+        return (machine, "list_dir", {"path": path})
+    if _DESKTOP_OPEN_RE.search(low):
+        target = re.sub(r"^.*?\b(?:open|launch|start)\b\s*", "", body,
+                        flags=re.I)
+        target = re.sub(r"\b(?:the|a|an|please|for me|up)\b", " ", target,
+                        flags=re.I)
+        target = re.sub(r"\s+", " ", target).strip(" ,.!?-\"'")
+        return (machine, "open", {"target": target}) if target else None
+    return None
+
+
+def _desktop_reply(machine: str, cmd: str, args: dict, res: dict) -> str:
+    """Format a desktop-bridge result into a one-line spoken confirmation."""
+    if not isinstance(res, dict) or res.get("error"):
+        err = res.get("error") if isinstance(res, dict) else "no response"
+        return f"I couldn't do that on the {machine}, sir — {err}"
+    if cmd == "open":
+        return (
+            f"Opened {res.get('opened', args.get('target', ''))} "
+            f"on the {machine}, sir."
+        )
+    if cmd == "list_dir":
+        entries = res.get("entries", [])
+        return f"The {machine} folder holds {len(entries)} items, sir."
+    if cmd == "read_file":
+        content = (res.get("content") or "").strip()
+        if not content:
+            return f"That file on the {machine} is empty, sir."
+        return f"Here is that file on the {machine}, sir: {content[:300]}"
+    if cmd == "shell":
+        out = (res.get("stdout") or "").strip()
+        rc = res.get("returncode")
+        tail = f" {out[:280]}" if out else ""
+        return f"Done on the {machine}, sir — exit {rc}.{tail}"
+    return f"Done on the {machine}, sir."
+
+
 class Assistant(Agent):
     def __init__(self, room: rtc.Room):
         super().__init__(instructions=AGENT_INSTRUCTION)
@@ -260,6 +514,9 @@ class Assistant(Agent):
         self._seen_cam = False
         self._seen_screen = False
         self._video_tasks: set[asyncio.Task] = set()
+        # Live remote-browser widget (Phase 4)
+        self._browser = None
+        self._browser_task: asyncio.Task | None = None
         self._wire_video(room)
 
     # ── Video capture (camera + screen-share) ────────────────────────
@@ -409,6 +666,345 @@ class Assistant(Agent):
             parts.append(f"stderr: {err}")
         return " | ".join(parts)
 
+    # ── Screen widget tools (floating HUD panels) ───────────────────
+    async def _publish_ui(self, msg: dict) -> None:
+        """Send a UI command to the browser on the `jarvis-ui` topic."""
+        try:
+            await self._room.local_participant.publish_data(
+                json.dumps(msg).encode("utf-8"),
+                reliable=True,
+                topic=_UI_TOPIC,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("jarvis-ui publish failed: %s", exc)
+
+    async def _maybe_handle_widget(self, text: str) -> None:
+        """Open/close screen widgets when the user asks.
+
+        Best-effort fallback so panels still work even if the LLM
+        doesn't emit a show_widget tool call. Safe to double-fire —
+        widgets are singletons on the browser side.
+        """
+        if not text:
+            return
+        opening = bool(_UI_OPEN_RE.search(text))
+        closing = bool(_UI_CLOSE_RE.search(text))
+        if not (opening or closing):
+            return
+        if closing and re.search(
+            r"\b(all|everything|every (widget|panel)|the (widgets|panels))\b",
+            text,
+            re.I,
+        ):
+            await self._publish_ui({"type": "close_all"})
+            return
+        kind = _widget_from_text(text)
+        if kind is None:
+            return
+        if closing and not opening:
+            await self._publish_ui({"type": "close_widget", "kind": kind})
+        else:
+            await self._publish_ui({"type": "open_widget", "kind": kind})
+
+    async def _maybe_handle_content(self, text: str) -> bool:
+        """Handle search / video / news / maps / browser intents by regex.
+
+        Returns True when an intent was handled — the caller then stops
+        the turn, since we speak our own confirmation. This is the
+        reliable path: the web_search / search_youtube / show_news /
+        show_map / open_browser methods are unreliable as LLM tools.
+        """
+        intent = _content_intent(text)
+        if intent is None:
+            return False
+        kind, arg = intent
+        dispatch = {
+            "web": lambda: self.web_search(arg),
+            "youtube": lambda: self.search_youtube(arg),
+            "news": lambda: self.show_news(arg),
+            "maps": lambda: self.show_map(arg),
+            "browser": lambda: self.open_browser(
+                arg or "https://www.google.com"
+            ),
+        }
+        if kind not in dispatch:
+            return False
+        try:
+            # Bound the search/browser call so a hung provider can never
+            # freeze the whole voice turn.
+            reply = await asyncio.wait_for(dispatch[kind](), timeout=20.0)
+        except asyncio.TimeoutError:
+            logger.error("content intent '%s' timed out", kind)
+            reply = "That's taking too long, sir — try again in a moment."
+        except Exception as exc:  # noqa: BLE001
+            logger.error("content intent '%s' failed: %s", kind, exc)
+            reply = "I couldn't complete that just now, sir."
+        try:
+            await self.session.say(reply)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _maybe_handle_desktop(self, text: str) -> bool:
+        """Operate the user's Windows machines when explicitly asked.
+
+        Regex fallback for the desktop-control tools — fires the
+        DesktopBridge directly and speaks its result. Returns True when a
+        desktop intent was handled (caller stops the turn).
+        """
+        intent = _desktop_intent(text)
+        if intent is None:
+            return False
+        machine, cmd, args = intent
+        timeout = 70.0 if cmd == "shell" else 30.0
+        try:
+            res = await self._desktop.send(machine, cmd, args, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("desktop intent failed: %s", exc)
+            res = {"error": str(exc)}
+        try:
+            await self.session.say(_desktop_reply(machine, cmd, args, res))
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    @function_tool
+    async def show_widget(self, widget: str, title: str = "") -> str:
+        """Display a floating widget panel on the user's JARVIS screen.
+
+        Use this when the user asks to open, show, or bring up a panel.
+
+        Args:
+            widget: Which panel — one of "chat", "clock", "music",
+                "search", "news", "youtube", "maps", "apps", "system".
+            title: Optional custom header text for the panel.
+        """
+        kind = (widget or "").strip().lower()
+        valid = {
+            "chat", "clock", "music", "search", "news",
+            "youtube", "maps", "browser", "apps", "system",
+        }
+        if kind not in valid:
+            return (
+                f"There is no '{widget}' widget. Available panels: "
+                + ", ".join(sorted(valid))
+            )
+        msg: dict = {"type": "open_widget", "kind": kind}
+        if title:
+            msg["title"] = title
+        await self._publish_ui(msg)
+        return f"Displayed the {kind} widget on screen."
+
+    @function_tool
+    async def hide_widget(self, widget: str = "") -> str:
+        """Close a floating widget on the user's JARVIS screen.
+
+        Args:
+            widget: Which panel to close. Pass "all" (or leave it
+                empty) to clear every widget from the screen.
+        """
+        kind = (widget or "").strip().lower()
+        if kind in ("", "all", "everything"):
+            await self._publish_ui({"type": "close_all"})
+            return "Cleared all widgets from the screen."
+        await self._publish_ui({"type": "close_widget", "kind": kind})
+        return f"Closed the {kind} widget."
+
+    # ── Search & content tools (web, video, news, maps) ─────────────
+    async def web_search(self, query: str) -> str:
+        """Search the web and show the results on the JARVIS screen.
+
+        Use this when the user asks to search for, google, or look up
+        something on the web.
+
+        Args:
+            query: What to search the web for.
+        """
+        results = await search_tools.web_search(query, limit=6)
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "search",
+                "title": f"Search — {query}",
+                "payload": {"query": query, "results": results},
+            }
+        )
+        if not results:
+            return f"I couldn't find anything for '{query}', sir."
+        return f"I found {len(results)} results for '{query}', now on screen."
+
+    async def search_youtube(self, query: str) -> str:
+        """Search YouTube and show the videos on the JARVIS screen.
+
+        Args:
+            query: What videos to search for.
+        """
+        videos = await search_tools.youtube_search(query, limit=8)
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "youtube",
+                "title": f"YouTube — {query}",
+                "payload": {"query": query, "videos": videos},
+            }
+        )
+        if not videos:
+            return f"No videos found for '{query}', sir."
+        return (
+            f"I found {len(videos)} videos for '{query}' — "
+            "the first is ready to play."
+        )
+
+    async def show_news(self, topic: str = "") -> str:
+        """Show current news headlines on the JARVIS screen.
+
+        Args:
+            topic: Optional subject to focus the news on (e.g.
+                "technology"). Leave empty for the top headlines.
+        """
+        articles = await search_tools.news_search(topic, limit=8)
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "news",
+                "title": f"News — {topic}" if topic else "Top Headlines",
+                "payload": {"query": topic, "articles": articles},
+            }
+        )
+        if not articles:
+            return "I couldn't reach the news feed just now, sir."
+        where = f" on {topic}" if topic else ""
+        return f"Here are {len(articles)} headlines{where}, sir."
+
+    async def show_map(self, place: str) -> str:
+        """Show a place, address, or directions on a map on the JARVIS
+        screen.
+
+        Args:
+            place: A place or address (e.g. "Tower Bridge, London"), or
+                a directions query (e.g. "London to Oxford").
+        """
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "maps",
+                "title": f"Maps — {place}",
+                "payload": {"query": place},
+            }
+        )
+        return f"Showing {place} on the map, sir."
+
+    # ── Live remote-browser widget (Phase 4) ────────────────────────
+    async def _publish_browser(self, msg: dict) -> None:
+        """Publish a frame chunk on the `jarvis-browser` data topic."""
+        try:
+            await self._room.local_participant.publish_data(
+                json.dumps(msg).encode("utf-8"),
+                reliable=True,
+                topic="jarvis-browser",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("jarvis-browser publish failed: %s", exc)
+
+    async def _push_browser_frame(self) -> None:
+        """Screenshot the live page and stream it in ~12 KB chunks."""
+        if self._browser is None:
+            return
+        img = await self._browser.screenshot()
+        if img is None:
+            return
+        b64 = base64.b64encode(img).decode()
+        frame_id = uuid.uuid4().hex[:8]
+        size = 12000
+        total = max(1, (len(b64) + size - 1) // size)
+        for seq in range(total):
+            msg: dict = {
+                "t": "frame",
+                "id": frame_id,
+                "seq": seq,
+                "total": total,
+                "data": b64[seq * size : (seq + 1) * size],
+            }
+            if seq == 0:
+                msg["url"] = self._browser.url
+            await self._publish_browser(msg)
+
+    async def _browser_stream_loop(self) -> None:
+        """Refresh the streamed frame while the browser widget is open."""
+        try:
+            await asyncio.sleep(0.4)  # let the widget mount + subscribe
+            while self._browser is not None:
+                await self._push_browser_frame()
+                await asyncio.sleep(1.5)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.error("browser stream loop failed: %s", exc)
+
+    async def _stop_browser(self) -> None:
+        """Cancel streaming and close the Playwright page, if any."""
+        task, self._browser_task = self._browser_task, None
+        if task is not None:
+            task.cancel()
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            await browser.close()
+
+    async def handle_browser_event(self, msg: dict) -> None:
+        """Apply a relayed interaction from the browser widget."""
+        if self._browser is None:
+            return
+        action = msg.get("action")
+        if action == "click":
+            await self._browser.click(
+                float(msg.get("x", 0.0)), float(msg.get("y", 0.0))
+            )
+        elif action == "scroll":
+            await self._browser.scroll(float(msg.get("dy", 0.0)))
+        elif action == "navigate":
+            await self._browser.navigate(str(msg.get("url", "")))
+        elif action == "back":
+            await self._browser.back()
+        elif action == "reload":
+            await self._browser.reload()
+        elif action == "key":
+            await self._browser.key(str(msg.get("key", "")))
+        elif action == "close":
+            await self._stop_browser()
+            return
+        else:
+            return
+        await self._push_browser_frame()
+
+    async def open_browser(self, url: str = "https://www.google.com") -> str:
+        """Open a live, interactive web browser on the JARVIS screen.
+
+        It is a real Chromium page — the user can click links, scroll,
+        type, and enter a new address in the widget itself.
+
+        Args:
+            url: The page to open. Defaults to Google.
+        """
+        from browser_view import BrowserSession
+
+        await self._stop_browser()
+        browser = BrowserSession()
+        try:
+            await browser.open(url)
+        except Exception as exc:  # noqa: BLE001
+            return f"I couldn't open the browser, sir: {exc}"
+        self._browser = browser
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "browser",
+                "title": "Browser",
+                "payload": {"loading": True},
+            }
+        )
+        self._browser_task = asyncio.create_task(self._browser_stream_loop())
+        return f"The browser is open, sir — loading {url}."
+
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         """Wake/sleep gate, then vision injection.
 
@@ -438,6 +1034,20 @@ class Assistant(Agent):
                 self._awake = False
                 await self.session.say("Goodbye, sir.")
                 raise StopResponse()
+
+        # ── Screen content — search / video / news / maps / browser ──
+        # Regex fallback: the voice LLM does not reliably emit tool calls,
+        # so detect the intent here and run the real flow. We speak our
+        # own confirmation, so stop the turn before it reaches the LLM.
+        if await self._maybe_handle_content(text):
+            raise StopResponse()
+
+        # ── Desktop control — operate the user's Windows machines ────
+        if await self._maybe_handle_desktop(text):
+            raise StopResponse()
+
+        # ── Screen widgets (open/close panels on request) ────────────
+        await self._maybe_handle_widget(text)
 
         # ── Vision injection (only runs while awake) ─────────────────
         if not _is_vision_intent(text):
@@ -524,9 +1134,10 @@ async def entrypoint(ctx: agents.JobContext):
         mcp_servers=mcp_servers,
     )
 
+    assistant = Assistant(ctx.room)
     await session.start(
         room=ctx.room,
-        agent=Assistant(ctx.room),
+        agent=assistant,
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC(),
             # Required for the worker to receive the user's camera and
@@ -534,6 +1145,18 @@ async def entrypoint(ctx: agents.JobContext):
             video_enabled=True,
         ),
     )
+
+    # Relay live-browser interactions (click / scroll / key / navigate)
+    # from the browser widget back to the worker's Playwright page.
+    @ctx.room.on("data_received")
+    def _on_browser_data(packet: rtc.DataPacket) -> None:
+        if packet.topic != "jarvis-browser":
+            return
+        try:
+            msg = json.loads(bytes(packet.data).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        asyncio.create_task(assistant.handle_browser_event(msg))
 
     # Bridge the JS UI's `lk.agent.request` text-stream topic into the
     # agent. The agent-starter-react chat box publishes typed messages

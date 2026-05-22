@@ -9,8 +9,10 @@ import { AgentSessionProvider } from '@/components/agents-ui/agent-session-provi
 import { StartAudioButton } from '@/components/agents-ui/start-audio-button';
 import { ViewController } from '@/components/app/view-controller';
 import { Toaster } from '@/components/ui/sonner';
+import { WidgetLayer } from '@/components/widgets/widget-layer';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useDebugMode } from '@/hooks/useDebug';
+import { JarvisUIProvider } from '@/lib/jarvis-ui/store';
 import { getSandboxTokenSource } from '@/lib/utils';
 
 const IN_DEVELOPMENT = process.env.NODE_ENV !== 'production';
@@ -41,9 +43,13 @@ export function App({ appConfig }: AppProps) {
   return (
     <AgentSessionProvider session={session}>
       <AppSetup />
-      <main className="grid h-svh grid-cols-1 place-content-center">
-        <ViewController appConfig={appConfig} />
-      </main>
+      <JarvisUIProvider>
+        <main className="grid h-svh grid-cols-1 place-content-center">
+          <ViewController appConfig={appConfig} />
+        </main>
+        {/* Floating voice-summoned widgets — drawn over the session view. */}
+        <WidgetLayer />
+      </JarvisUIProvider>
       <StartAudioButton label="Start Audio" />
       <Toaster
         icons={{

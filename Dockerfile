@@ -68,11 +68,17 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
+# Playwright Chromium — the fallback search engine, used when the Brave
+# Search / YouTube Data API free tiers are exhausted (or no key is set).
+RUN apt-get update \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 # Pre-warm Silero VAD so the first voice session has no model-download stall
 RUN python -c "from livekit.plugins import silero; silero.VAD.load()" 2>/dev/null || true
 
 # Worker code (explicit list — no COPY . . sprawl)
-COPY agent.py prompts.py hermes_adapter.py ./
+COPY agent.py prompts.py hermes_adapter.py search_tools.py browser_view.py ./
 COPY thirdparty/ ./thirdparty/
 
 # Next.js standalone artifacts. Standalone is a minimised tree; static
