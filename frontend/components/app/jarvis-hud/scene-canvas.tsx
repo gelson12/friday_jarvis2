@@ -111,12 +111,12 @@ function OuterShell() {
   });
   return (
     <mesh ref={ref}>
-      <icosahedronGeometry args={[3.4, 1]} />
+      <icosahedronGeometry args={[2.2, 1]} />
       <meshBasicMaterial
         color="#3CDFFF"
         wireframe
         transparent
-        opacity={0.18}
+        opacity={0.15}
         depthWrite={false}
       />
     </mesh>
@@ -165,7 +165,9 @@ export function SceneCanvas({ tier, onContextLost }: SceneCanvasProps) {
     <>
       {Bridge}
       <Canvas
-        camera={{ position: [0, 0, 8], fov: 50 }}
+        // Pulled back from z=8 to z=14 so the orb + outer shell fit
+        // comfortably with margin around the audio visualizer tile.
+        camera={{ position: [0, 0, 14], fov: 45 }}
         dpr={[1, dprCap]}
         gl={{
           powerPreference: 'high-performance',

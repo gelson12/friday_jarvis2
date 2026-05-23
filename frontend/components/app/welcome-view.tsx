@@ -20,7 +20,7 @@ export const WelcomeView = ({
           initializing
         </p>
         <p className="mt-2 font-mono text-[10px] tracking-[0.25em] text-cyan-300/50 uppercase">
-          friday.uplink&nbsp;&middot;&nbsp;say &ldquo;hey friday&rdquo; once connected
+          friday.uplink
         </p>
       </div>
     </div>

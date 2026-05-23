@@ -153,7 +153,7 @@ export function Core({ signals }: CoreProps) {
     <group ref={groupRef}>
       {/* Main orb */}
       <mesh ref={meshRef}>
-        <icosahedronGeometry args={[1.2, 5]} />
+        <icosahedronGeometry args={[0.85, 4]} />
         <meshStandardMaterial
           ref={matRef}
           color={BASE}

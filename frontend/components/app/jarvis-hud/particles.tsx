@@ -60,7 +60,7 @@ export function Particles({ signals, count = 280 }: ParticlesProps) {
       <group ref={innerRef}>
         <Sparkles
           count={Math.floor(count * 0.6)}
-          scale={[6, 6, 6]}
+          scale={[4, 4, 4]}
           size={3}
           speed={0.4}
           opacity={0.9}
@@ -71,7 +71,7 @@ export function Particles({ signals, count = 280 }: ParticlesProps) {
       <group ref={outerRef}>
         <Sparkles
           count={Math.floor(count * 0.4)}
-          scale={[12, 9, 12]}
+          scale={[8, 6, 8]}
           size={2}
           speed={0.2}
           opacity={0.6}
