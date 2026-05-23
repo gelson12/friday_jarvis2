@@ -1,0 +1,39 @@
+name: Scheduled start (07:00 local)
+
+# Restarts the listed Railway services every morning at 06:00 UTC,
+# which equals:
+#   • 07:00 BST  (UK summer)
+#   • 06:00 GMT  (UK winter — services start 1h earlier)
+# Mirror of scheduled-stop.yml. Same exclusion list.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip actual restart — only print what would happen"
+        type: boolean
+        default: false
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet httpx
+
+      - name: Restart services
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          python .github/scripts/railway_schedule.py \
+            --action start \
+            --project "divine-contentment" \
+            --services "OpenJarvis,friday_jarvis2,hermes-agent,N8N,VS-Code-inspiring-cat"

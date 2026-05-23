@@ -1,0 +1,43 @@
+name: Scheduled stop (23:00 local)
+
+# Stops the listed Railway services every night at 22:00 UTC,
+# which equals:
+#   • 23:00 BST  (UK summer, late Mar – late Oct)
+#   • 22:00 GMT  (UK winter — services stop 1h earlier)
+# Excluded from the schedule (always running):
+#   • Postgres            (DB — corruption risk if stopped mid-write)
+#   • obsidian-vault      (writes from agents)
+#   • obsidian-mind       (separate project, dormant)
+#   • LiveKit-self-host-OSS  (keep voice/bridges live 24/7)
+
+on:
+  schedule:
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip actual stop — only print what would happen"
+        type: boolean
+        default: false
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet httpx
+
+      - name: Stop services
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          python .github/scripts/railway_schedule.py \
+            --action stop \
+            --project "divine-contentment" \
+            --services "OpenJarvis,friday_jarvis2,hermes-agent,N8N,VS-Code-inspiring-cat"
