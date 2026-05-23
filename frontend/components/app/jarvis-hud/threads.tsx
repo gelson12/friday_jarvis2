@@ -1,150 +1,113 @@
 'use client';
 
 import { useMemo, useRef } from 'react';
-import * as THREE from 'three';
-import { Line } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
 import type { SceneSignalsRefs } from './use-scene-signals';
 
-const BASE = '#3CDFFF';
+const BASE = new THREE.Color('#3CDFFF');
 const THREAD_COUNT = 12;
 const THREAD_LEN = 5.5;
-const SEGMENTS = 24;
 
 interface ThreadsProps {
   signals: SceneSignalsRefs;
 }
 
-// Twelve curved "neural threads" radiating from the core. Each thread is a
-// quadratic bezier from origin to a fixed anchor, sampled into SEGMENTS
-// points. Dashed line material animates dashOffset → signal traveling along
-// the thread. Pulse direction inverts between inward (listening, thinking)
-// and outward (speaking).
+// Twelve thin energy beams radiating from the core. Each beam is a
+// stretched cylinder with an emissive cyan material — far more robust
+// in production than drei's <Line> (which uses Line2 / MeshLine and
+// occasionally fails to mount under Next.js prod bundling).
+//
+// Reactivity: per-thread emissive intensity oscillates with the agent
+// state (faster pulse when thinking, amplitude-driven on speaking).
 export function Threads({ signals }: ThreadsProps) {
-  // Generate THREAD_COUNT pre-sampled bezier point arrays — fixed geometry,
-  // useMemo to build once.
+  // Pre-compute thread orientations once.
   const threads = useMemo(() => {
-    const out: { points: THREE.Vector3[] }[] = [];
+    const out: { rotation: [number, number, number]; phase: number }[] = [];
     for (let i = 0; i < THREAD_COUNT; i++) {
       const theta = (i / THREAD_COUNT) * Math.PI * 2;
-      // Distribute slightly out of equatorial plane.
       const phi = Math.PI / 2 + (Math.random() - 0.5) * 0.8;
-      const anchor = new THREE.Vector3(
-        THREAD_LEN * Math.sin(phi) * Math.cos(theta),
-        THREAD_LEN * Math.cos(phi),
-        THREAD_LEN * Math.sin(phi) * Math.sin(theta)
+      const direction = new THREE.Vector3(
+        Math.sin(phi) * Math.cos(theta),
+        Math.cos(phi),
+        Math.sin(phi) * Math.sin(theta)
       );
-      const mid = anchor.clone().multiplyScalar(0.5);
-      // Perp offset for curvature
-      const perp = new THREE.Vector3(-Math.sin(theta), 0, Math.cos(theta)).multiplyScalar(
-        (Math.random() - 0.5) * 1.8
+      // A cylinder's default axis is Y. Rotate so its Y axis points along `direction`.
+      const q = new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        direction.clone().normalize()
       );
-      mid.add(perp);
-
-      const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(0, 0, 0), mid, anchor);
-      const points = curve.getPoints(SEGMENTS);
-      out.push({ points });
+      const e = new THREE.Euler().setFromQuaternion(q);
+      out.push({ rotation: [e.x, e.y, e.z], phase: Math.random() * Math.PI * 2 });
     }
     return out;
   }, []);
 
-  // One ref per thread to animate dashOffset (and color/opacity).
-  const lineRefs = useRef<Array<THREE.Object3D | null>>([]);
-  const dashOffsets = useRef<number[]>(new Array(THREAD_COUNT).fill(0));
-  const params = useRef({ pulseRate: 0.0, direction: 1, opacity: 0.25 });
+  const groupRef = useRef<THREE.Group>(null);
+  const matRefs = useRef<Array<THREE.MeshBasicMaterial | null>>([]);
+  const elapsed = useRef(0);
 
   useFrame((_, dt) => {
+    elapsed.current += dt;
     const state = signals.stateRef.current;
     const volume = signals.volumeRef.current;
 
-    let tRate = 0.0;
-    let tDir = 1;
-    let tOp = 0.2;
+    let pulseRate = 0.6;
+    let baseIntensity = 0.25;
+    let volumeBoost = 0;
     switch (state) {
       case 'listening':
       case 'pre-connect-buffering':
-        tRate = 1.0 + volume * 0.8;
-        tDir = -1;
-        tOp = 0.35 + volume * 0.3;
+        pulseRate = 1.4;
+        baseIntensity = 0.4;
+        volumeBoost = volume * 0.45;
         break;
       case 'thinking':
-        tRate = 2.4;
-        tDir = -1;
-        tOp = 0.5;
+        pulseRate = 3.0;
+        baseIntensity = 0.55;
         break;
       case 'speaking':
-        tRate = 1.6 + volume * 1.2;
-        tDir = 1;
-        tOp = 0.45 + volume * 0.4;
+        pulseRate = 2.2;
+        baseIntensity = 0.5;
+        volumeBoost = volume * 0.6;
         break;
-      case 'idle':
-        tRate = 0.2;
-        tOp = 0.22;
-        break;
-      case 'connecting':
-      case 'initializing':
-        tRate = 0.0;
-        tOp = 0.15;
-        break;
-      default:
-        tRate = 0.0;
-        tOp = 0.18;
     }
-    const k = Math.min(1, dt * 4);
-    params.current.pulseRate += (tRate - params.current.pulseRate) * k;
-    params.current.direction = tDir;
-    params.current.opacity += (tOp - params.current.opacity) * k;
 
     for (let i = 0; i < THREAD_COUNT; i++) {
-      // Stagger thread phases so pulses don't all fire on the same tick.
-      const stagger = (i / THREAD_COUNT) * 0.8;
-      dashOffsets.current[i] += dt * params.current.pulseRate * params.current.direction;
-      const obj = lineRefs.current[i] as unknown as {
-        material?: {
-          dashOffset?: number;
-          opacity?: number;
-          uniforms?: Record<string, { value: number }>;
-        };
-      } | null;
-      if (obj?.material) {
-        // drei <Line> uses a MeshLineMaterial with uniforms.dashOffset
-        const mat = obj.material as {
-          dashOffset?: number;
-          opacity?: number;
-          uniforms?: { dashOffset?: { value: number }; opacity?: { value: number } };
-        };
-        if (mat.uniforms?.dashOffset) {
-          mat.uniforms.dashOffset.value = dashOffsets.current[i] + stagger;
-        } else if (mat.dashOffset !== undefined) {
-          mat.dashOffset = dashOffsets.current[i] + stagger;
-        }
-        if (mat.uniforms?.opacity) {
-          mat.uniforms.opacity.value = params.current.opacity;
-        } else if (mat.opacity !== undefined) {
-          mat.opacity = params.current.opacity;
-        }
-      }
+      const m = matRefs.current[i];
+      if (!m) continue;
+      const phase = threads[i].phase;
+      const wave = 0.5 + 0.5 * Math.sin(elapsed.current * pulseRate + phase);
+      m.opacity = baseIntensity + 0.4 * wave + volumeBoost;
+    }
+
+    if (groupRef.current) {
+      groupRef.current.rotation.y += dt * 0.08;
     }
   });
 
   return (
-    <group>
+    <group ref={groupRef}>
       {threads.map((t, i) => (
-        <Line
-          key={i}
-          ref={(el) => {
-            lineRefs.current[i] = el as unknown as THREE.Object3D | null;
-          }}
-          points={t.points}
-          color={BASE}
-          lineWidth={1.2}
-          dashed
-          dashScale={4}
-          dashSize={0.06}
-          gapSize={0.08}
-          transparent
-          opacity={0.25}
-        />
+        // Place the cylinder so its base sits at the origin: a cylinder
+        // is centered on its midpoint by default, so we offset along its
+        // local Y by half the length, then apply the orientation.
+        <group key={i} rotation={t.rotation}>
+          <mesh position={[0, THREAD_LEN / 2, 0]}>
+            <cylinderGeometry args={[0.015, 0.015, THREAD_LEN, 8, 1, true]} />
+            <meshBasicMaterial
+              ref={(el) => {
+                matRefs.current[i] = el;
+              }}
+              color={BASE}
+              transparent
+              opacity={0.4}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+        </group>
       ))}
     </group>
   );

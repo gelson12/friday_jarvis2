@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import * as THREE from 'three';
 import { Core } from './core';
 import { Particles } from './particles';
 import { PostFx } from './post-fx';
@@ -13,6 +14,23 @@ interface SceneCanvasProps {
   /** GPU tier (drei useDetectGPU.tier). 2 = downgrade, 3+ = full effects */
   tier: number;
   onContextLost: () => void;
+}
+
+// Sets the renderer clear color and the scene fog imperatively via
+// useThree. Doing this in JSX with <color attach="background"> /
+// <fog attach="fog"> works in dev but has been observed to silently
+// fail under some prod bundles — falling back to direct r3f access
+// is more robust.
+function SceneSetup() {
+  const { gl, scene } = useThree();
+  useEffect(() => {
+    gl.setClearColor(new THREE.Color('#02060b'), 1);
+    scene.fog = new THREE.Fog('#02060b', 7, 16);
+    return () => {
+      scene.fog = null;
+    };
+  }, [gl, scene]);
+  return null;
 }
 
 // Smooth mouse-based camera parallax. Runs inside the Canvas tree so it can
@@ -82,6 +100,29 @@ function ContextLossDetector({ onContextLost }: { onContextLost: () => void }) {
   return null;
 }
 
+// Wireframe outer shell — gives the orb a "containment field" feel. Cheap:
+// low-poly icosahedron, wireframe material, slow rotation.
+function OuterShell() {
+  const ref = useRef<THREE.Mesh>(null);
+  useFrame((_, dt) => {
+    if (!ref.current) return;
+    ref.current.rotation.y += dt * 0.12;
+    ref.current.rotation.x += dt * 0.05;
+  });
+  return (
+    <mesh ref={ref}>
+      <icosahedronGeometry args={[3.4, 1]} />
+      <meshBasicMaterial
+        color="#3CDFFF"
+        wireframe
+        transparent
+        opacity={0.18}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+}
+
 interface SceneContentsProps {
   signals: SceneSignalsRefs;
   highTier: boolean;
@@ -92,19 +133,17 @@ interface SceneContentsProps {
 function SceneContents({ signals, highTier, particleCount, onContextLost }: SceneContentsProps) {
   return (
     <>
+      <SceneSetup />
       <CameraParallax />
       <VisibilityPause />
       <ContextLossDetector onContextLost={onContextLost} />
 
-      {/* Deep-space ambience */}
-      <color attach="background" args={['#02060b']} />
-      <fog attach="fog" args={['#02060b', 6, 14]} />
+      {/* Lighting — soft cyan rim so the orb's metalness reads */}
+      <ambientLight intensity={0.25} />
+      <pointLight position={[3, 2, 3]} intensity={0.8} color="#3CDFFF" />
+      <pointLight position={[-3, -2, -3]} intensity={0.5} color="#9CF3FF" />
 
-      {/* Lighting just enough to register the orb's metalness */}
-      <ambientLight intensity={0.2} />
-      <pointLight position={[3, 2, 3]} intensity={0.6} color="#3CDFFF" />
-      <pointLight position={[-3, -2, -3]} intensity={0.4} color="#3CDFFF" />
-
+      <OuterShell />
       <Core signals={signals} />
       <Rings />
       <Threads signals={signals} />
@@ -119,13 +158,11 @@ export function SceneCanvas({ tier, onContextLost }: SceneCanvasProps) {
   const { stateRef, volumeRef, Bridge } = useSceneSignals();
 
   const highTier = tier >= 3;
-  const particleCount = highTier ? 500 : 250;
+  const particleCount = highTier ? 400 : 220;
   const dprCap = highTier ? 1.5 : 1.25;
 
   return (
     <>
-      {/* Bridge mounts inside any LiveKitRoom ancestor and writes refs.
-          It renders nothing visually. */}
       {Bridge}
       <Canvas
         camera={{ position: [0, 0, 8], fov: 50 }}
