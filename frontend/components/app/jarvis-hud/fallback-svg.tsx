@@ -103,14 +103,43 @@ export function FallbackSvg() {
           <text x="405" y="5">E</text>
         </g>
 
+        {/* Outer pulse rings emanating from the core */}
         <g stroke="#3CDFFF" fill="none">
-          <circle r="60" strokeOpacity="0.85" strokeWidth="1.2" className="jh-pulse-a" />
-          <circle r="60" strokeOpacity="0.55" strokeWidth="1" className="jh-pulse-b" />
-          <circle r="60" strokeOpacity="0.35" strokeWidth="0.8" className="jh-pulse-c" />
+          <circle r="110" strokeOpacity="0.85" strokeWidth="1.6" className="jh-pulse-a" />
+          <circle r="110" strokeOpacity="0.55" strokeWidth="1.2" className="jh-pulse-b" />
+          <circle r="110" strokeOpacity="0.35" strokeWidth="1" className="jh-pulse-c" />
         </g>
 
-        <circle r="60" fill="url(#jh-core)" className="jh-core" />
-        <circle r="22" fill="#9CF3FF" opacity="0.95" className="jh-core-bright" />
+        {/* Outer halo glow — wide, soft cyan corona */}
+        <circle r="160" fill="url(#jh-core)" className="jh-halo" opacity="0.55" />
+
+        {/* Reactor body: layered glowing rings around the bright core */}
+        <g className="jh-core">
+          <circle r="110" fill="url(#jh-core)" />
+          <circle r="92" stroke="#3CDFFF" strokeOpacity="0.55" strokeWidth="1.5" fill="none" />
+          <circle r="78" stroke="#9CF3FF" strokeOpacity="0.85" strokeWidth="1.2" fill="none" />
+          <circle r="62" stroke="#3CDFFF" strokeOpacity="0.4" strokeWidth="1" fill="none" strokeDasharray="2 4" />
+          {/* Iron-Man-style 6 inner triangular vanes */}
+          <g stroke="#9CF3FF" strokeOpacity="0.85" strokeWidth="1.2" fill="none">
+            {Array.from({ length: 6 }).map((_, i) => {
+              const a = (i / 6) * Math.PI * 2;
+              return (
+                <line
+                  key={i}
+                  x1={Math.cos(a) * 32}
+                  y1={Math.sin(a) * 32}
+                  x2={Math.cos(a) * 58}
+                  y2={Math.sin(a) * 58}
+                />
+              );
+            })}
+          </g>
+        </g>
+
+        {/* Bright center bulb */}
+        <circle r="38" fill="url(#jh-core)" className="jh-core-mid" opacity="0.9" />
+        <circle r="24" fill="#9CF3FF" opacity="0.95" className="jh-core-bright" />
+        <circle r="10" fill="#FFFFFF" opacity="0.9" className="jh-core-hot" />
 
         <g fill="#9CF3FF">
           <g className="jh-spin-cw-slow">
@@ -136,9 +165,9 @@ export function FallbackSvg() {
         <span className="jh-sub">core::online</span>
       </div>
       <div className="jh-bracket jh-tr">
-        <span className="jh-label">LK</span>
-        <span className="jh-val">LIVEKIT</span>
-        <span className="jh-sub">link::secure</span>
+        <span className="jh-label">UPLINK</span>
+        <span className="jh-val">JARVIS NET</span>
+        <span className="jh-sub">signal::nominal</span>
       </div>
       <div className="jh-bracket jh-bl">
         <span className="jh-label">RTC</span>
@@ -215,22 +244,39 @@ export function FallbackSvg() {
         }
         @keyframes jh-rot { to { transform: rotate(360deg); } }
 
-        .jh-core {
+        .jh-core, .jh-core-mid, .jh-core-bright, .jh-core-hot, .jh-halo {
           transform-origin: center;
           transform-box: fill-box;
-          animation: jh-core-pulse 3.6s ease-in-out infinite;
         }
+        .jh-core       { animation: jh-core-pulse 4.2s ease-in-out infinite; }
+        .jh-core-mid   { animation: jh-core-pulse 3.2s ease-in-out infinite; filter: drop-shadow(0 0 24px #3CDFFF); }
         .jh-core-bright {
-          filter: blur(0.5px) drop-shadow(0 0 16px #3CDFFF);
+          filter: blur(0.5px) drop-shadow(0 0 24px #9CF3FF);
           animation: jh-core-bright 2.4s ease-in-out infinite;
         }
+        .jh-core-hot {
+          filter: blur(2px) drop-shadow(0 0 28px #FFFFFF);
+          animation: jh-core-hot 1.8s ease-in-out infinite;
+        }
+        .jh-halo {
+          filter: blur(28px);
+          animation: jh-halo 5s ease-in-out infinite;
+        }
         @keyframes jh-core-pulse {
-          0%, 100% { transform: scale(0.92); opacity: 0.78; }
-          50%      { transform: scale(1.08); opacity: 1; }
+          0%, 100% { transform: scale(0.95); opacity: 0.85; }
+          50%      { transform: scale(1.06); opacity: 1; }
         }
         @keyframes jh-core-bright {
-          0%, 100% { opacity: 0.85; }
-          50%      { opacity: 1; }
+          0%, 100% { opacity: 0.85; transform: scale(0.95); }
+          50%      { opacity: 1;    transform: scale(1.08); }
+        }
+        @keyframes jh-core-hot {
+          0%, 100% { opacity: 0.75; transform: scale(0.85); }
+          50%      { opacity: 1;    transform: scale(1.18); }
+        }
+        @keyframes jh-halo {
+          0%, 100% { opacity: 0.45; transform: scale(0.92); }
+          50%      { opacity: 0.75; transform: scale(1.08); }
         }
 
         .jh-pulse-a, .jh-pulse-b, .jh-pulse-c { transform-origin: 0 0; }
@@ -290,7 +336,8 @@ export function FallbackSvg() {
 
         @media (prefers-reduced-motion: reduce) {
           .jh-spin-cw, .jh-spin-cw-slow, .jh-spin-ccw, .jh-spin-ccw-slow,
-          .jh-sweep, .jh-core, .jh-core-bright,
+          .jh-sweep,
+          .jh-core, .jh-core-mid, .jh-core-bright, .jh-core-hot, .jh-halo,
           .jh-pulse-a, .jh-pulse-b, .jh-pulse-c,
           .jh-grid, .jh-flicker {
             animation: none;
