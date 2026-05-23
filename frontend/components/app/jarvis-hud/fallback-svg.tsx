@@ -1,10 +1,14 @@
-// Full-screen animated HUD backdrop (pure CSS/SVG, no image assets).
-// Sits behind all app content: fixed, inset-0, z-index below content,
-// pointer-events: none so it never intercepts clicks.
-export function JarvisHudBackground() {
+// Static SVG/CSS HUD backdrop. Used when WebGL is unavailable, GPU tier is
+// too low to render the 3D scene smoothly, the user prefers reduced motion,
+// or the live scene's WebGL context is lost mid-session.
+export function FallbackSvg() {
   return (
-    <div aria-hidden className="jarvis-hud" data-jarvis-hud>
-      <svg className="jarvis-hud-svg" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid slice">
+    <div aria-hidden className="jarvis-hud-fallback">
+      <svg
+        className="jarvis-hud-fallback-svg"
+        viewBox="0 0 1000 1000"
+        preserveAspectRatio="xMidYMid slice"
+      >
         <defs>
           <radialGradient id="hud-glow" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stopColor="#3CDFFF" stopOpacity="0.30" />
@@ -34,25 +38,23 @@ export function JarvisHudBackground() {
         </g>
       </svg>
 
-      <div className="jarvis-hud-scanlines" />
+      <div className="jarvis-hud-fallback-scanlines" />
 
       <style>{`
-        .jarvis-hud {
-          position: fixed;
+        .jarvis-hud-fallback {
+          position: absolute;
           inset: 0;
-          z-index: -10;
           overflow: hidden;
-          pointer-events: none;
           background: #02060b;
         }
-        .jarvis-hud-svg {
+        .jarvis-hud-fallback-svg {
           position: absolute;
           inset: 0;
           width: 100%;
           height: 100%;
           filter: blur(1.5px) brightness(0.7);
         }
-        .jarvis-hud-scanlines {
+        .jarvis-hud-fallback-scanlines {
           position: absolute;
           inset: 0;
           background: repeating-linear-gradient(

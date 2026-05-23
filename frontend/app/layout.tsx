@@ -1,7 +1,6 @@
 import { Public_Sans } from 'next/font/google';
 import localFont from 'next/font/local';
 import { headers } from 'next/headers';
-import { JarvisHudBackground } from '@/components/app/jarvis-hud-background';
 import { ThemeProvider } from '@/components/app/theme-provider';
 import { ThemeToggle } from '@/components/app/theme-toggle';
 import { cn } from '@/lib/shadcn/utils';
@@ -72,7 +71,6 @@ export default async function RootLayout({ children }: RootLayoutProps) {
           forcedTheme="dark"
           disableTransitionOnChange
         >
-          <JarvisHudBackground />
           <header className="fixed top-0 left-0 z-50 hidden w-full flex-row justify-between p-6 md:flex">
             <span className="scale-100 transition-transform duration-300 hover:scale-110">
               {/* eslint-disable-next-line @next/next/no-img-element */}
