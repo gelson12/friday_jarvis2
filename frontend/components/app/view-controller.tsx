@@ -41,11 +41,32 @@ export function ViewController({ appConfig }: ViewControllerProps) {
   // mic permission once (LiveKit WebRTC init); after the first Allow it
   // is automatic on every visit. Wake/sleep ("Hey Friday" / "goodbye
   // Friday") is gated server-side in the worker, not in the browser.
+  //
+  // Auto-RECONNECT if the session drops (LiveKit job process exits on
+  // participant disconnect — every refresh / network hiccup ends the
+  // job, and without a manual "Talk to Friday" button the user would
+  // be stranded on the welcome view. We retry with a small delay so
+  // we don't hammer the API in a tight loop on a permanent failure.
   const startedRef = useRef(false);
+  const wasConnectedRef = useRef(false);
   useEffect(() => {
-    if (startedRef.current || isConnected) return;
-    startedRef.current = true;
-    void start();
+    if (isConnected) {
+      wasConnectedRef.current = true;
+      return;
+    }
+    // Not connected. Either initial mount, or we dropped.
+    if (!startedRef.current) {
+      startedRef.current = true;
+      void start();
+      return;
+    }
+    if (wasConnectedRef.current) {
+      // We were connected and lost it — retry after a brief delay.
+      const t = window.setTimeout(() => {
+        void start();
+      }, 2000);
+      return () => window.clearTimeout(t);
+    }
   }, [isConnected, start]);
 
   return (
