@@ -158,9 +158,12 @@ def _clean_query(text: str) -> str:
         prev = q
         q = _QUERY_NOISE.sub(" ", q)
     q = re.sub(r"\s+", " ", q).strip(" ,.?!-\"'")
-    # Drop a dangling leading article left after the command word is gone
-    # ("play a video of cars" -> "a cars" -> "cars").
-    q = re.sub(r"^(?:a|an|the|some|my)\b\s*", "", q, flags=re.I)
+    # Drop a dangling leading article / filler pronoun left after the
+    # command word is gone ("play a video of cars" -> "a cars" -> "cars";
+    # "google me tom cruise" -> "me tom cruise" -> "tom cruise"). "me" /
+    # "for me" added because "google me X" / "search me X" are common
+    # spoken forms.
+    q = re.sub(r"^(?:a|an|the|some|my|me|for\s+me)\b\s*", "", q, flags=re.I)
     return q
 
 
@@ -180,6 +183,15 @@ def _content_intent(text: str):
         return ("browser", url.group(1) if url else "")
     if url:
         return ("browser", url.group(1))
+
+    # "google map(s)" is unambiguous — must route to maps, NOT websearch.
+    # Without this, the bare "google" in _WEBSEARCH_RE swallows the phrase
+    # and we search the web for "map" (zero useful results).
+    if re.search(r"\bgoogle\s+maps?\b", low):
+        q = re.sub(r"\b(?:google\s+)?maps?\b|\bnavigation\b", " ", t, flags=re.I)
+        q = _clean_query(q)
+        q = re.sub(r"^(?:of|to|for|the|on)\s+", "", q, flags=re.I).strip()
+        return ("maps", q)
 
     if _YOUTUBE_RE.search(low):
         # The query can sit either side of "youtube" ("cars on youtube",
