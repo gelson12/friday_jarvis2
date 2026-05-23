@@ -37,7 +37,14 @@ def prewarm(proc: agents.JobProcess):
 # returns to dormant on the sleep phrase. Gating happens in
 # on_user_turn_completed via `raise StopResponse()` (verified: livekit-
 # agents 1.5.8 catches it and skips the turn).
-_WAKE_RE = re.compile(r"\b(hey\s+|ok\s+|okay\s+)?friday\b", re.I)
+_WAKE_RE = re.compile(
+    r"\b("
+    r"hey\s+|ok\s+|okay\s+|hi\s+|hello\s+|yo\s+|"
+    r"good\s+(?:morning|afternoon|evening|night)\s+"
+    r"|wake\s+up,?\s+|wake\s+|are\s+you\s+there,?\s+"
+    r")?friday\b",
+    re.I,
+)
 _SLEEP_RE = re.compile(r"\bgood\s?bye,?\s+friday\b", re.I)
 
 
