@@ -16,22 +16,42 @@ export interface SceneSignalsRefs {
   volumeRef: React.MutableRefObject<number>;
 }
 
-function VoiceAssistantBridge({ stateRef, volumeRef }: SceneSignalsRefs) {
-  const { state, audioTrack } = useVoiceAssistant();
-  const volume = useTrackVolume(audioTrack as TrackReference, {
+// Mount only when audioTrack is defined. useTrackVolume crashes in prod
+// when given undefined — pre-connect, the agent participant doesn't exist
+// yet, so audioTrack is undefined and we must not call the hook.
+function VolumeReader({
+  audioTrack,
+  volumeRef,
+}: {
+  audioTrack: TrackReference;
+  volumeRef: React.MutableRefObject<number>;
+}) {
+  const volume = useTrackVolume(audioTrack, {
     fftSize: 512,
     smoothingTimeConstant: 0.55,
   });
+  useEffect(() => {
+    volumeRef.current = volume ?? 0;
+  }, [volume, volumeRef]);
+  return null;
+}
+
+function VoiceAssistantBridge({ stateRef, volumeRef }: SceneSignalsRefs) {
+  const { state, audioTrack } = useVoiceAssistant();
 
   useEffect(() => {
     stateRef.current = (state ?? 'idle') as SceneState;
   }, [state, stateRef]);
 
+  // Reset to zero when the track goes away so the orb doesn't freeze on
+  // the last amplitude after a disconnect.
   useEffect(() => {
-    volumeRef.current = volume ?? 0;
-  }, [volume, volumeRef]);
+    if (!audioTrack) volumeRef.current = 0;
+  }, [audioTrack, volumeRef]);
 
-  return null;
+  return audioTrack ? (
+    <VolumeReader audioTrack={audioTrack as TrackReference} volumeRef={volumeRef} />
+  ) : null;
 }
 
 /**

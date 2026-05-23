@@ -1,11 +1,15 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Component, type ReactNode, useEffect, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { FallbackSvg } from './fallback-svg';
 
-// Lazy-load the heavy three.js/r3f/drei/postprocessing chunk so it never
-// blocks first paint of the rest of the app.
-const SceneCanvas = lazy(() => import('./scene-canvas'));
+// Lazy-load the heavy three.js/r3f/drei/postprocessing chunk via Next's
+// dynamic so it's properly code-split and never SSRs.
+const SceneCanvas = dynamic(() => import('./scene-canvas').then((m) => m.SceneCanvas), {
+  ssr: false,
+  loading: () => <FallbackSvg />,
+});
 
 interface Capabilities {
   webgl: boolean;
@@ -57,10 +61,37 @@ function detectCapabilities(): Capabilities {
   };
 }
 
+// Any error inside the 3D scene falls back to the SVG instead of crashing
+// the whole app. The Bridge / Canvas / shader code touches WebGL APIs and
+// LiveKit hooks — a single bad assumption shouldn't take down the page.
+class SceneErrorBoundary extends Component<
+  { children: ReactNode; onError: () => void },
+  { hasError: boolean }
+> {
+  constructor(props: { children: ReactNode; onError: () => void }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(err: Error) {
+    if (typeof console !== 'undefined') {
+      console.error('[jarvis-hud] scene crashed, falling back to SVG:', err);
+    }
+    this.props.onError();
+  }
+  render() {
+    if (this.state.hasError) return <FallbackSvg />;
+    return this.props.children;
+  }
+}
+
 export function JarvisHudBackground() {
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [mountScene, setMountScene] = useState(false);
   const [contextLost, setContextLost] = useState(false);
+  const [sceneCrashed, setSceneCrashed] = useState(false);
 
   // Probe once on mount.
   useEffect(() => {
@@ -101,14 +132,20 @@ export function JarvisHudBackground() {
     );
   }
 
-  const use3d = caps.webgl && !caps.reducedMotion && caps.tier >= 2 && !contextLost && mountScene;
+  const use3d =
+    caps.webgl &&
+    !caps.reducedMotion &&
+    caps.tier >= 2 &&
+    !contextLost &&
+    !sceneCrashed &&
+    mountScene;
 
   return (
     <div aria-hidden style={wrapperStyle}>
       {use3d ? (
-        <Suspense fallback={<FallbackSvg />}>
+        <SceneErrorBoundary onError={() => setSceneCrashed(true)}>
           <SceneCanvas tier={caps.tier} onContextLost={() => setContextLost(true)} />
-        </Suspense>
+        </SceneErrorBoundary>
       ) : (
         <FallbackSvg />
       )}
