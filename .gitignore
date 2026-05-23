@@ -13,3 +13,8 @@ _intent_check.py
 
 # Per-PC bridge config — never tracked (each machine has its own keys)
 desktop-bridge/run.bat
+
+# One-shot operational scripts (may contain transient credentials)
+rotate_livekit.py
+rotate_livekit.bat
+push_refactor_to_rog.py
