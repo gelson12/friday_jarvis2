@@ -10,3 +10,6 @@ desktop-bridge/venv/
 
 # Local debug artifacts
 _intent_check.py
+
+# Per-PC bridge config — never tracked (each machine has its own keys)
+desktop-bridge/run.bat
