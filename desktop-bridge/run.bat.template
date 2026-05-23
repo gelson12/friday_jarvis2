@@ -1,0 +1,36 @@
+@echo off
+REM ===================================================================
+REM  Desktop Bridge — per-PC launcher (TEMPLATE)
+REM ===================================================================
+REM  COPY this file to run.bat (gitignored), then fill in the two
+REM  ***FILL_ME_IN*** values below. run.bat is per-machine and is
+REM  never committed.
+REM
+REM  This bridge no longer needs LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
+REM  It fetches a short-lived JWT from the worker on each connect,
+REM  authenticated by BRIDGE_TOKEN. The raw LiveKit secret lives only
+REM  in Railway env vars on the friday_jarvis2 service.
+REM ===================================================================
+cd /d "%~dp0"
+
+REM ---- per-machine config (fill these in) ---------------------------
+REM URL of the friday_jarvis2 worker's bridge-token route:
+set LIVEKIT_TOKEN_ENDPOINT=https://fridayjarvis2-production.up.railway.app/api/bridge/token
+REM Shared bridge-auth secret — must match Railway BRIDGE_TOKEN env var:
+set BRIDGE_TOKEN=***FILL_ME_IN***
+REM Distinct label per machine — "laptop" on the laptop, "rog" on the ROG:
+set JARVIS_MACHINE=laptop
+REM Set to 1 to allow the cloud agent to run shell commands here:
+set JARVIS_BRIDGE_ALLOW_SHELL=1
+REM -------------------------------------------------------------------
+
+if not exist venv (
+  py -3.12 -m venv venv
+)
+call venv\Scripts\activate.bat
+REM Always sync deps — fast when already satisfied, picks up new ones
+REM (e.g. httpx for the token-fetch path) without a manual reinstall.
+python -m pip install -q -r requirements.txt
+
+python bridge.py
+pause

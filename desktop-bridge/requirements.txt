@@ -1,6 +1,8 @@
 livekit>=0.18
 livekit-api>=0.8
 python-dotenv>=1.0
+# Used by the modern token-fetch auth path (LIVEKIT_TOKEN_ENDPOINT mode).
+httpx>=0.27
 # System volume — precise absolute get/set + mute. Optional; bridge.py
 # falls back to the OS media keys if these are absent.
 pycaw>=20240210

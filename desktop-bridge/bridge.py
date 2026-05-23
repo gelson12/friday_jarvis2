@@ -601,10 +601,65 @@ def _execute(cmd: str, args: dict) -> dict:
 
 
 # ── LiveKit connection ───────────────────────────────────────────────
-def _mint_token() -> str:
-    key = os.environ["LIVEKIT_API_KEY"]
-    secret = os.environ["LIVEKIT_API_SECRET"]
-    return (
+# Two auth modes, preferred order:
+#   1. Token-fetch (modern). LIVEKIT_TOKEN_ENDPOINT + BRIDGE_TOKEN are set;
+#      the bridge POSTs to the endpoint and receives a fresh JWT signed by
+#      the worker's LIVEKIT_API_SECRET. The raw secret never has to live on
+#      this PC. Tokens are refetched every reconnect.
+#   2. Legacy local-mint (fallback). LIVEKIT_API_KEY + LIVEKIT_API_SECRET
+#      are set in env; the bridge mints its own JWT locally. Kept so older
+#      run.bat configs keep working until they're migrated.
+def _fetch_token_via_http() -> tuple[str, str] | None:
+    """Fetch a fresh JWT from the worker's bridge-token endpoint."""
+    endpoint = os.environ.get("LIVEKIT_TOKEN_ENDPOINT", "").strip()
+    bridge_token = os.environ.get("BRIDGE_TOKEN", "").strip()
+    if not (endpoint and bridge_token):
+        return None
+    try:
+        import httpx  # local import keeps legacy mode dep-free
+    except ImportError:
+        logger.error(
+            "httpx not installed — required for LIVEKIT_TOKEN_ENDPOINT mode. "
+            "Run `pip install -r requirements.txt`."
+        )
+        return None
+    try:
+        r = httpx.post(
+            endpoint,
+            json={"machine": MACHINE},
+            headers={"Authorization": f"Bearer {bridge_token}"},
+            timeout=15.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("token endpoint request failed: %s", exc)
+        return None
+    if r.status_code == 401:
+        logger.error("token endpoint rejected our BRIDGE_TOKEN (401) — "
+                     "check that BRIDGE_TOKEN matches the value set on Railway")
+        return None
+    if r.status_code == 503:
+        logger.error("token endpoint reports BRIDGE_TOKEN not configured on "
+                     "the worker side — set BRIDGE_TOKEN in Railway env vars")
+        return None
+    try:
+        r.raise_for_status()
+        data = r.json()
+        return str(data["serverUrl"]), str(data["token"])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("token endpoint response invalid (%s): %s",
+                     r.status_code, exc)
+        return None
+
+
+def _mint_token_legacy() -> tuple[str, str] | None:
+    """Mint a JWT locally from LIVEKIT_API_KEY + LIVEKIT_API_SECRET (legacy)."""
+    url = os.environ.get("LIVEKIT_URL", "").strip()
+    key = os.environ.get("LIVEKIT_API_KEY", "").strip()
+    secret = os.environ.get("LIVEKIT_API_SECRET", "").strip()
+    # Filter out the post-scrub placeholders so they're not mistaken for keys.
+    if "***REMOVED***" in (key, secret) or not (url and key and secret):
+        return None
+    token = (
         api.AccessToken(key, secret)
         .with_identity(f"desktop-bridge-{MACHINE}")
         .with_name(f"Desktop Bridge ({MACHINE})")
@@ -619,10 +674,31 @@ def _mint_token() -> str:
         )
         .to_jwt()
     )
+    return url, token
+
+
+def _get_url_and_token() -> tuple[str, str] | None:
+    """Pick the modern HTTP-fetch path if configured, else the legacy mint."""
+    fetched = _fetch_token_via_http()
+    if fetched is not None:
+        return fetched
+    legacy = _mint_token_legacy()
+    if legacy is not None:
+        logger.warning(
+            "using legacy LIVEKIT_API_KEY/SECRET auth — "
+            "set BRIDGE_TOKEN + LIVEKIT_TOKEN_ENDPOINT to move secrets off this PC"
+        )
+        return legacy
+    return None
 
 
 async def _run_once() -> None:
-    url = os.environ["LIVEKIT_URL"]
+    creds = _get_url_and_token()
+    if creds is None:
+        # Tell main() to retry — likely transient (Railway redeploying, or
+        # BRIDGE_TOKEN not yet set on the server side).
+        raise RuntimeError("no LiveKit creds available — retrying")
+    url, token = creds
     room = rtc.Room()
 
     @room.on("data_received")
@@ -631,7 +707,7 @@ async def _run_once() -> None:
             return
         asyncio.create_task(_handle(room, packet))
 
-    await room.connect(url, _mint_token())
+    await room.connect(url, token)
     logger.info(
         "connected to room '%s' as desktop-bridge-%s (shell=%s)",
         CONTROL_ROOM,
@@ -674,10 +750,22 @@ async def _handle(room: rtc.Room, packet: rtc.DataPacket) -> None:
 
 
 async def main() -> None:
-    for var in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
-        if not os.environ.get(var):
-            logger.error("missing required env var %s", var)
-            sys.exit(1)
+    # Two valid configurations: (a) LIVEKIT_TOKEN_ENDPOINT + BRIDGE_TOKEN
+    # (modern, no raw secret on this PC), or (b) LIVEKIT_URL +
+    # LIVEKIT_API_KEY + LIVEKIT_API_SECRET (legacy). Verify at least one.
+    modern = bool(
+        os.environ.get("LIVEKIT_TOKEN_ENDPOINT") and os.environ.get("BRIDGE_TOKEN")
+    )
+    legacy = all(
+        os.environ.get(v) and "***REMOVED***" not in os.environ.get(v, "")
+        for v in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
+    )
+    if not (modern or legacy):
+        logger.error(
+            "missing config — set either LIVEKIT_TOKEN_ENDPOINT+BRIDGE_TOKEN "
+            "(preferred) or LIVEKIT_URL+LIVEKIT_API_KEY+LIVEKIT_API_SECRET"
+        )
+        sys.exit(1)
     backoff = 1.0
     while True:
         try:
