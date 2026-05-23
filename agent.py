@@ -1463,7 +1463,14 @@ class Assistant(Agent):
                 rest = _WAKE_RE.sub("", text).strip(" ,.!?-")
                 if len(rest.split()) >= 2:
                     # "Hey Friday, what's the time" — answer the question.
-                    new_message.content = [rest]
+                    # Update local text so downstream regex handlers see
+                    # the clean query. Deliberately do NOT mutate
+                    # new_message.content — livekit-agents fires
+                    # preemptive LLM generation before this handler
+                    # finishes, and mutating the message invalidates the
+                    # speculative result (adding whole-RTT latency on
+                    # every wake turn). Modern LLMs cope with the
+                    # leading "Hey Friday," fine.
                     text = rest
                 else:
                     await self.session.say(await self._wake_greeting())
