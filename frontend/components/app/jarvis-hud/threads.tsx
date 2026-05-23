@@ -7,7 +7,9 @@ import type { SceneSignalsRefs } from './use-scene-signals';
 
 const BASE = new THREE.Color('#3CDFFF');
 const THREAD_COUNT = 12;
-const THREAD_LEN = 5.5;
+// Shortened from 5.5: at the previous length, threads extended far beyond
+// the visible viewport, looking like errant lasers cutting the screen.
+const THREAD_LEN = 2.6;
 
 interface ThreadsProps {
   signals: SceneSignalsRefs;
@@ -94,7 +96,7 @@ export function Threads({ signals }: ThreadsProps) {
         // local Y by half the length, then apply the orientation.
         <group key={i} rotation={t.rotation}>
           <mesh position={[0, THREAD_LEN / 2, 0]}>
-            <cylinderGeometry args={[0.015, 0.015, THREAD_LEN, 8, 1, true]} />
+            <cylinderGeometry args={[0.008, 0.008, THREAD_LEN, 8, 1, true]} />
             <meshBasicMaterial
               ref={(el) => {
                 matRefs.current[i] = el;

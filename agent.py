@@ -1475,10 +1475,22 @@ class Assistant(Agent):
         """
         text = getattr(new_message, "text_content", "") or ""
 
+        # Diagnostic: every transcribed user turn lands here. Logging the
+        # raw text + current awake state + wake-regex match lets us debug
+        # wake-word misses from the Railway deploy log without needing
+        # browser DevTools.
+        logger.info(
+            "turn: awake=%s text=%r match=%s",
+            self._awake,
+            text,
+            bool(_WAKE_RE.search(text)),
+        )
+
         # ── Wake / sleep state machine ───────────────────────────────
         if not self._awake:
             if _WAKE_RE.search(text):
                 self._awake = True
+                logger.info("wake: triggered by %r", text)
                 rest = _WAKE_RE.sub("", text).strip(" ,.!?-")
                 if len(rest.split()) >= 2:
                     # "Hey Friday, what's the time" — answer the question.
