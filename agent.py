@@ -1071,7 +1071,9 @@ class Assistant(Agent):
 
     async def _wake_greeting(self) -> str:
         """Spoken on the FIRST wake of a session — includes which of the
-        user's PCs are online so they don't have to discover it later."""
+        user's PCs are online so they don't have to discover it later.
+        FRIDAY-style: leads with the polite greeting, then a soft "quick
+        system status" framing before naming what's offline."""
         if self._announced_status:
             return "Yes, sir?"
         self._announced_status = True
@@ -1082,19 +1084,21 @@ class Assistant(Agent):
         online = self._desktop.online_machines()
         if not online:
             return (
-                "At your service, sir. Note — no desktop bridges are "
-                "online; start desktop-bridge\\run.bat on the laptop or "
-                "the ROG if you need me to operate them."
+                "At your service, sir. Just a quick system status — it "
+                "seems there's currently no connectivity with the desktop "
+                "or ROG bridge. A quick desktop-bridge\\run.bat on either "
+                "machine and I'll be at the helm."
             )
         if len(online) == 1:
+            other = "ROG" if online[0] == "laptop" else "laptop"
             return (
-                f"At your service, sir. Your {online[0]} is online "
-                "and ready."
+                f"At your service, sir. Quick system note — your "
+                f"{online[0]} is online and ready; the {other} bridge "
+                "is dark at the moment."
             )
         return (
-            "At your service, sir. "
-            + " and ".join(online).capitalize()
-            + " are both online."
+            "At your service, sir. All bridges nominal — both your "
+            "laptop and the ROG are online and at your command."
         )
 
     async def _maybe_handle_desktop(self, text: str) -> bool:
@@ -1127,11 +1131,12 @@ class Assistant(Agent):
 
         if machine != "all" and not self._desktop.is_online(machine):
             msg = (
-                f"Your {machine}'s desktop-bridge isn't connected, sir — "
-                "start desktop-bridge\\run.bat on that machine."
+                f"My apologies, sir — it appears your {machine}'s bridge "
+                "is offline at the moment. A quick desktop-bridge\\run.bat "
+                "on that machine and we'll be back in business."
             )
             if online:
-                msg += f" Online right now: {', '.join(online)}."
+                msg += f" Still online for you: {', '.join(online)}."
             try:
                 await self.session.say(msg)
             except Exception:  # noqa: BLE001
