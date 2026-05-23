@@ -19,8 +19,10 @@ interface CoreProps {
 // LiveKit agent state and mic volume. Brand cyan locked; only V/S vary.
 export function Core({ signals }: CoreProps) {
   const groupRef = useRef<THREE.Group>(null);
-  // MeshDistortMaterial's ref isn't fully typed — we read .distort/.speed.
-  const matRef = useRef<THREE.MeshStandardMaterial & { distort: number; speed: number }>(null);
+  // MeshDistortMaterial's ref shape varies across drei versions — use a
+  // permissive any-typed ref and feature-detect each property at write
+  // time so a property rename in a future drei version can't crash us.
+  const matRef = useRef<unknown>(null);
   const innerMatRef = useRef<THREE.MeshBasicMaterial>(null);
 
   const p = useRef({
@@ -83,16 +85,18 @@ export function Core({ signals }: CoreProps) {
     p.current.sat += (tSat - p.current.sat) * k(4);
     p.current.scale += (tScale - p.current.scale) * k(8);
 
-    const m = matRef.current;
+    const m = matRef.current as
+      | (THREE.MeshStandardMaterial & { distort?: number; speed?: number })
+      | null;
     if (m) {
-      m.distort = p.current.distort;
-      m.speed = p.current.speed;
+      if ('distort' in m) m.distort = p.current.distort;
+      if ('speed' in m) m.speed = p.current.speed;
       m.emissiveIntensity = p.current.brightness * 1.8;
       const c = BASE.clone()
         .lerp(DESATURATED, 1 - p.current.sat)
         .multiplyScalar(p.current.brightness);
-      m.color.copy(c);
-      m.emissive.copy(BASE).multiplyScalar(p.current.brightness * 0.6);
+      if (m.color) m.color.copy(c);
+      if (m.emissive) m.emissive.copy(BASE).multiplyScalar(p.current.brightness * 0.6);
     }
     if (innerMatRef.current) {
       innerMatRef.current.opacity = 0.35 + p.current.brightness * 0.4;
@@ -109,8 +113,10 @@ export function Core({ signals }: CoreProps) {
       <mesh>
         <icosahedronGeometry args={[1.2, 4]} />
         <MeshDistortMaterial
-          // @ts-expect-error — drei material ref type lags
-          ref={matRef}
+          // drei v10's DistortMaterialImpl is not exported; the runtime
+          // instance has .distort / .speed / .color / .emissive which we
+          // touch via a feature-detected unknown ref in useFrame above.
+          ref={matRef as unknown as React.Ref<never>}
           color={BASE}
           emissive={BASE}
           emissiveIntensity={1.2}

@@ -75,9 +75,23 @@ class SceneErrorBoundary extends Component<
   static getDerivedStateFromError() {
     return { hasError: true };
   }
-  componentDidCatch(err: Error) {
+  componentDidCatch(err: Error, info: { componentStack?: string }) {
     if (typeof console !== 'undefined') {
-      console.error('[jarvis-hud] scene crashed, falling back to SVG:', err);
+      // Loud, single-line message so it's easy to spot in Railway logs / DevTools.
+      // Includes the component stack so we can pinpoint which child threw.
+      console.error(
+        '[jarvis-hud] 3D scene threw — falling back to SVG HUD.\n' +
+          'Error: ' +
+          (err && err.message ? err.message : String(err)) +
+          (info && info.componentStack ? '\nStack:' + info.componentStack : '')
+      );
+      // Surface to a window flag so it's inspectable from the console:
+      //   `window.__jarvisHudCrash` will be the most recent error.
+      try {
+        (window as unknown as { __jarvisHudCrash?: Error }).__jarvisHudCrash = err;
+      } catch {
+        /* sandbox */
+      }
     }
     this.props.onError();
   }
