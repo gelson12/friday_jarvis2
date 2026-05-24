@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+local.properties
+gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio
+.idea/
+*.iml
+captures/
+
+# Keystores — NEVER commit
+*.jks
+*.keystore
+keystore.properties
+
+# Build outputs
+*.apk
+*.aab
+release/
+
+# OS noise
+.DS_Store
+Thumbs.db

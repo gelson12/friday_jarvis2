@@ -8,6 +8,7 @@ import asyncio
 import logging
 import httpx
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from livekit import agents, rtc, api
 from livekit.agents import (
@@ -545,6 +546,355 @@ def _norm_machine(machine: str) -> str:
     return "laptop"  # default — covers 'laptop', 'desktop', 'pc', '' etc.
 
 
+# ── Mobile bridge (operate the user's Android phone) ─────────────────
+# A `mobile-bridge` APK runs on the user's phone, joins the SAME
+# `jarvis-control` LiveKit room outbound, identity `mobile-bridge-
+# <phone>`, listens on `mobile-cmd`, publishes `mobile-result`. Separate
+# topics from desktop-cmd keep the wire contracts cleanly versioned.
+_MOBILE_TOPIC_CMD = "mobile-cmd"
+_MOBILE_TOPIC_RESULT = "mobile-result"
+_MOBILE_IDENTITY_PREFIX = "mobile-bridge-"
+
+
+class MobileBridge:
+    """Lazy LiveKit connection to the mobile-bridge control room.
+
+    Mirrors DesktopBridge but for the phone APK. Same control room,
+    different topics + identity prefix.
+    """
+
+    def __init__(self) -> None:
+        self._room: rtc.Room | None = None
+        self._pending: dict[str, asyncio.Future] = {}
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _phone_from_identity(identity: str) -> str | None:
+        if not identity or not identity.startswith(_MOBILE_IDENTITY_PREFIX):
+            return None
+        return identity[len(_MOBILE_IDENTITY_PREFIX):].strip().lower() or None
+
+    def online_phones(self) -> list[str]:
+        if self._room is None:
+            return []
+        phones: set[str] = set()
+        for p in self._room.remote_participants.values():
+            name = self._phone_from_identity(getattr(p, "identity", "") or "")
+            if name:
+                phones.add(name)
+        return sorted(phones)
+
+    def is_online(self, phone: str) -> bool:
+        p = (phone or "").strip().lower()
+        if p in ("", "any", "all", "phone", "mobile"):
+            return bool(self.online_phones())
+        return p in set(self.online_phones())
+
+    async def _ensure(self) -> rtc.Room | None:
+        async with self._lock:
+            if self._room is not None:
+                return self._room
+            url = os.environ.get("LIVEKIT_URL", "")
+            key = os.environ.get("LIVEKIT_API_KEY", "")
+            secret = os.environ.get("LIVEKIT_API_SECRET", "")
+            if not (url and key and secret):
+                logger.warning("mobile bridge: LIVEKIT_* env not set")
+                return None
+            token = (
+                api.AccessToken(key, secret)
+                .with_identity(f"friday-worker-mob-{uuid.uuid4().hex[:8]}")
+                .with_grants(
+                    api.VideoGrants(
+                        room_join=True,
+                        room=_CONTROL_ROOM,
+                        can_publish=True,
+                        can_subscribe=True,
+                        can_publish_data=True,
+                    )
+                )
+                .to_jwt()
+            )
+            room = rtc.Room()
+
+            @room.on("data_received")
+            def _on_data(packet: rtc.DataPacket) -> None:  # noqa: ANN001
+                if packet.topic != _MOBILE_TOPIC_RESULT:
+                    return
+                try:
+                    msg = json.loads(bytes(packet.data).decode("utf-8"))
+                except Exception:  # noqa: BLE001
+                    return
+                fut = self._pending.pop(msg.get("id", ""), None)
+                if fut and not fut.done():
+                    fut.set_result(msg)
+
+            await room.connect(url, token)
+            self._room = room
+            logger.info("mobile bridge: connected to '%s'", _CONTROL_ROOM)
+            return room
+
+    async def send(
+        self, target: str, cmd: str, args: dict, timeout: float = 30.0
+    ) -> dict:
+        room = await self._ensure()
+        if room is None:
+            return {"error": "mobile bridge unavailable (LIVEKIT_* unset)"}
+        cmd_id = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending[cmd_id] = fut
+        payload = json.dumps(
+            {"id": cmd_id, "target": target, "cmd": cmd, "args": args}
+        ).encode("utf-8")
+        try:
+            await room.local_participant.publish_data(
+                payload, reliable=True, topic=_MOBILE_TOPIC_CMD
+            )
+            msg = await asyncio.wait_for(fut, timeout)
+            return msg.get("result", {})
+        except asyncio.TimeoutError:
+            self._pending.pop(cmd_id, None)
+            return {
+                "error": f"no response from the '{target}' phone — is the "
+                f"Jarvis Mobile Bridge app open and connected?"
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._pending.pop(cmd_id, None)
+            return {"error": str(exc)}
+
+
+# ── Mobile intent routing ────────────────────────────────────────────
+# Broad gate: utterance MIGHT be a mobile request. Generous net.
+_MOBILE_HINT_RE = re.compile(
+    r"\b("
+    r"phone|mobile|cell|cellphone|smartphone|android|pixel|oneplus|samsung|"
+    r"text|texts|sms|"
+    r"call|dial|ring|"
+    r"contact|contacts|phonebook|phone\s+book|"
+    r"whatsapp|wapp|whats\s+app|"
+    r"battery|charge|charging|signal|reception|"
+    r"instagram|insta|tiktok|tik\s+tok|facebook|messenger|youtube|"
+    r"install|uninstall|"
+    r"app|apps"
+    r")\b",
+    re.I,
+)
+
+# Explicit machine-clause variant ("on my phone").
+_MOBILE_MACHINE_RE = re.compile(
+    r"\b(?:on|via|through|using|in|to|from)\s+"
+    r"(?:my\s+|the\s+|this\s+)?"
+    r"(phone|mobile|cell|cellphone|smartphone|android|pixel|oneplus|samsung)\b"
+    r"|\bmy\s+(phone|mobile|cell|pixel|oneplus|samsung)\b",
+    re.I,
+)
+
+_BRIDGE_MOBILE_COMMANDS_GUIDE = """\
+Available mobile-bridge commands (the user's Android phone):
+
+  sms_list         {"limit": 10, "number_filter": "<optional>"}
+  sms_send         {"number": "<phone>", "message": "<text>"}
+  contacts_search  {"query": "<name>", "limit": 10}
+  dial             {"number": "<phone>"}                       # opens dialer
+  open_app         {"name": "<app name>" or "package": "<bundle id>"}
+  list_apps        {}                                          # for fuzzy resolution
+  install_app      {"package": "<bundle id>"}                  # opens Play Store
+  uninstall_app    {"package": "<bundle id>"}                  # opens uninstall dialog
+  open_url         {"url": "<full URL>"}                       # opens browser
+  whatsapp_send    {"number": "<phone>", "message": "<text>"}  # opens WhatsApp pre-filled
+  device_status    {}                                          # battery / model / signal
+  host_info        {}
+
+NOT supported (no public personal-account API exists): sending DMs on
+Instagram, Facebook Messenger, or TikTok; posting to those platforms.
+For those intents pick `open_app` with the app name OR `open_url` with
+a deep-link such as instagram.com/<user>, m.me/<user>, ig.me/<user>."""
+
+
+_MOBILE_ROUTER_MODEL = os.environ.get(
+    "OPENJARVIS_ROUTER_MODEL", "google/gemini-2.0-flash-001"
+)
+
+
+async def _route_mobile(text: str, phones_online: list[str]) -> dict | None:
+    """Turn a free-form spoken request into a structured mobile-bridge command.
+
+    Returns ``{"phone", "cmd", "args", "say", "contact_query"?}`` on
+    success, or None when the request isn't a mobile command / the LLM
+    is unavailable.
+    """
+    client = _get_router_client()
+    if client is None or not text:
+        return None
+    online = ", ".join(phones_online) if phones_online else "none right now"
+    system = (
+        "You translate ONE spoken request into ONE command for the user's "
+        "Android phone. Output strict JSON only — no prose, no code fences.\n\n"
+        "Schema. Either:\n"
+        '  {"mobile": false}   — when the request is NOT about operating '
+        "their phone.\n"
+        "Or:\n"
+        '  {"mobile": true, "phone": "<phone_name>"|"any", '
+        '"command": "<name>", "args": {...}, '
+        '"contact_query": "<name>"?, '
+        '"say": "<one short butler-voice sentence>"}\n\n'
+        f"{_BRIDGE_MOBILE_COMMANDS_GUIDE}\n\n"
+        "Rules:\n"
+        "- Default phone: 'any'. Phones online right now: " + online + ".\n"
+        "- If the user names a CONTACT instead of a phone number for sms_send"
+        " / dial / whatsapp_send, set `contact_query` to the name and leave "
+        '`args.number` empty — the worker will resolve it via contacts_search.\n'
+        "- For 'open <social app>' use open_app with the app name.\n"
+        "- For 'send Instagram DM / FB message / TikTok message': output\n"
+        '  {"mobile": true, "phone": "any", "command": "open_app", '
+        '"args": {"name": "<instagram|messenger|tiktok>"}, '
+        '"say": "I can\'t message <Platform> directly from here, sir — '
+        'opening the app for you."}\n'
+        "- `dial` opens the dialer (no auto-call); `whatsapp_send` opens "
+        "WhatsApp pre-filled (user taps send).\n"
+        "- `say` is one short butler sentence ('Texting Mum, sir.', "
+        "'On it, sir.').\n"
+        "- If conversation / question / unclear, output {\"mobile\": false}."
+    )
+    try:
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_MOBILE_ROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+                response_format={"type": "json_object"},
+            ),
+            timeout=6.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mobile router LLM failed: %s", exc)
+        return None
+    raw = (resp.choices[0].message.content or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
+    try:
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mobile router non-JSON: %s — %r", exc, raw[:200])
+        return None
+    if not isinstance(data, dict) or not data.get("mobile"):
+        return None
+    cmd = (data.get("command") or "").strip()
+    if not cmd:
+        return None
+    return {
+        "phone": str(data.get("phone") or "any").strip().lower(),
+        "cmd": cmd,
+        "args": data.get("args") or {},
+        "contact_query": (data.get("contact_query") or "").strip(),
+        "say": (data.get("say") or "").strip(),
+    }
+
+
+def _mobile_reply(phone: str, cmd: str, args: dict, res: dict) -> str:
+    """Turn a mobile-bridge result dict into a butler-tone confirmation."""
+    if res.get("error"):
+        return f"That didn't work, sir — {res['error']}"
+    if cmd == "sms_send":
+        return "Texted them, sir."
+    if cmd == "sms_list":
+        messages = res.get("messages") or []
+        if not messages:
+            return "No recent messages, sir."
+        # Speak top 3 succinctly.
+        lines = []
+        for m in messages[:3]:
+            sender = m.get("from", "Unknown")
+            body = (m.get("body", "") or "").strip().replace("\n", " ")
+            if len(body) > 120:
+                body = body[:120] + "…"
+            lines.append(f"{sender}: {body}")
+        more = "" if len(messages) <= 3 else f" Plus {len(messages) - 3} more."
+        return "Your latest texts, sir. " + " ... ".join(lines) + more
+    if cmd == "contacts_search":
+        contacts = res.get("contacts") or []
+        if not contacts:
+            return "No contacts matched, sir."
+        if len(contacts) == 1:
+            c = contacts[0]
+            return f"That's {c.get('name', 'them')} at {c.get('number', '')}, sir."
+        names = ", ".join(c.get("name", "?") for c in contacts[:3])
+        return f"Found {len(contacts)} contacts, sir: {names}."
+    if cmd == "dial":
+        return "Dialler's up, sir — tap to call."
+    if cmd == "whatsapp_send":
+        return "WhatsApp's open and ready, sir — tap send."
+    if cmd == "open_app":
+        opened = res.get("opened") or args.get("name") or args.get("package")
+        return f"Opening {opened}, sir."
+    if cmd == "open_url":
+        return "On screen, sir."
+    if cmd == "list_apps":
+        apps = res.get("apps") or []
+        return f"You have {len(apps)} apps installed, sir."
+    if cmd == "install_app":
+        return "Play Store's up, sir — tap install."
+    if cmd == "uninstall_app":
+        return "Uninstall prompt's up, sir."
+    if cmd == "device_status":
+        bat = res.get("battery_percent")
+        charging = res.get("charging")
+        if bat is not None:
+            tail = " and charging" if charging else " and not charging"
+            return f"Battery is at {bat}%{tail}, sir."
+        return "Phone reports back, sir."
+    if cmd == "host_info":
+        model = res.get("model", "")
+        return f"That's your {model or phone}, sir." if model else f"Phone {phone} online, sir."
+    return f"Done on your {phone}, sir."
+
+
+# ── Telegram (worker-side via Bot API; no phone required) ────────────
+_TELEGRAM_RE = re.compile(
+    r"\b(?:telegram|tg)\b.*?\b(?:to|send|message|tell|ping)\b"
+    r"|\b(?:send|tell|message|ping)\b.*?\b(?:telegram|tg)\b",
+    re.I,
+)
+
+
+async def _extract_telegram_payload(text: str) -> dict | None:
+    """LLM-extract {contact, message} from a Telegram-send utterance."""
+    client = _get_router_client()
+    if client is None or not text:
+        return None
+    system = (
+        "Extract the recipient name and the message body from the user's "
+        "request to send a Telegram message. Output strict JSON only:\n"
+        '  {"contact": "<name>", "message": "<body>"}\n'
+        "Lowercase the contact name. Strip the verbs ('send', 'tell',\n"
+        "'telegram', 'message', etc.) from the message body."
+    )
+    try:
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_MOBILE_ROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.0,
+                max_tokens=200,
+                response_format={"type": "json_object"},
+            ),
+            timeout=6.0,
+        )
+        data = json.loads((resp.choices[0].message.content or "").strip())
+        if not data.get("contact") or not data.get("message"):
+            return None
+        return data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram extractor failed: %s", exc)
+        return None
+
+
 # ── Desktop control intent (regex fallback) ──────────────────────────
 # The desktop-control @function_tools (open_on_machine, …) only fire if
 # the voice LLM emits a tool call, which it does not do reliably. This
@@ -1037,11 +1387,621 @@ def _desktop_reply(machine: str, cmd: str, args: dict, res: dict) -> str:
     return f"Done on the {machine}, sir."
 
 
+# ── OpenCTI ↔ Jarvis intelligence layer ──────────────────────────────
+# Mirror of the same block in OpenJarvis_lk/livekit/worker.py. Keep the
+# two in sync — they share the same router prompt, the same GraphQL
+# operations, the same idle/lifecycle semantics. Voice surface is
+# identical so the user gets the same Tony-Stark experience whichever
+# Jarvis variant they wake.
+
+_CTI_HINT_RE = re.compile(
+    r"\b("
+    r"opencti|cti|"
+    r"intel|intelligence|threat|threats|"
+    r"observable|observables|indicator|indicators|"
+    r"incident|incidents|investigate|investigation|"
+    r"adversary|actor|ioc|iocs|stix|"
+    r"kill\s?chain|campaign|malware|phishing|breach|"
+    r"suspicious|"
+    r"log\s+(?:the\s+|that\s+|this\s+)?(?:domain|ip|url|hash|email|file)|"
+    r"indicators\s+of\s+compromise|"
+    r"global\s*eyes|"
+    r"(?:activate|wake|boot|fire\s?up|spin\s?up|stand\s?down|"
+    r"power\s?down|shut\s?down|kill)\s+(?:the\s+)?"
+    r"(?:global\s*eyes|intel|intelligence|cti|opencti)"
+    r")\b",
+    re.I,
+)
+
+_CTI_COMMANDS_GUIDE = """\
+Available OpenCTI commands (use `command` and `args`):
+
+  cti_search        {"query": "<term>", "limit": 10}
+  cti_add_observable {"value": "<observable value>",
+                      "observable_type": "domain"|"ip"|"ipv6"|"url"
+                                       |"email"|"md5"|"sha1"|"sha256"
+                                       |"hash"|"file"|"user-agent"
+                                       |"mutex"|"registry-key"}
+  cti_create_incident {"name": "<incident name>",
+                       "description": "<free text, optional>"}
+  cti_link          {"from_id": "<stix id>", "to_id": "<stix id>",
+                     "relationship": "related-to"|"indicates"
+                                   |"attributed-to"|"uses"|"targets"
+                                   |"mitigates"|"based-on"}
+  cti_summary       {"hours": 24}
+  cti_list_indicators {"limit": 10}
+  cti_enrich        {"value": "<observable value>",
+                     "observable_type": "domain"|"ip"|"ipv6"|"url"
+                                       |"email"|"md5"|"sha1"|"sha256"
+                                       |"hash"|"file"|"user-agent"
+                                       |"mutex"|"registry-key"}
+                    Add the observable AND wait ~30s for enrichment
+                    connectors (VirusTotal, AbuseIPDB, Shodan, etc.)
+                    to fire, then report the findings.
+  cti_open_panel    {"dashboard": "<slug>", "path": "<optional URL path>"}
+  cti_spinup        {}     # boot OpenCTI on Railway (~3 min cold start)
+  cti_spindown      {}     # tear it down to stop the Railway bill"""
+
+
+_CTI_OPEN_RE = re.compile(
+    r"\b(open|show|bring up|pop up|put up|launch|display)\b[^.]*"
+    r"\b(?:intel|intelligence|cti|opencti|threat\s+panel|threats?\s+dashboard)\b",
+    re.I,
+)
+
+
+async def _route_cti(text: str) -> dict | None:
+    """LLM-routed OpenCTI intent. Returns structured command or None.
+    Mirrors `_route_desktop()` with a CTI-focused prompt."""
+    client = _get_router_client()
+    if client is None or not text:
+        return None
+    system = (
+        "You translate ONE spoken request into ONE command for the user's "
+        "self-hosted OpenCTI intelligence platform. Output strict JSON "
+        "only — no prose, no code fences.\n\n"
+        "Schema. Either:\n"
+        '  {"cti": false}    — when the request is NOT about threat '
+        "intelligence / OpenCTI / investigations.\n"
+        "Or:\n"
+        '  {"cti": true, "command": "<name>", "args": {...}, '
+        '"say": "<one short butler-voice sentence>"}\n\n'
+        f"{_CTI_COMMANDS_GUIDE}\n\n"
+        "Rules:\n"
+        "- For 'log foo.com as a suspicious domain' → cti_add_observable.\n"
+        "- For 'enrich X' / 'look up X' / 'is X malicious' → cti_enrich.\n"
+        "- For 'open the intel panel' / 'show the threats dashboard' → "
+        "cti_open_panel.\n"
+        "- For 'activate / wake / spin up Global Eyes' → cti_spinup.\n"
+        "- For 'stand down / power down Global Eyes' → cti_spindown.\n"
+        "- `say` is one short butler-voice sentence.\n"
+        '- If unclear, output {"cti": false}.'
+    )
+    try:
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_ROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+                response_format={"type": "json_object"},
+            ),
+            timeout=6.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cti router LLM failed: %s", exc)
+        return None
+    raw = (resp.choices[0].message.content or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
+    try:
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cti router non-JSON: %s — %r", exc, raw[:200])
+        return None
+    if not isinstance(data, dict) or not data.get("cti"):
+        return None
+    cmd = (data.get("command") or "").strip()
+    if not cmd:
+        return None
+    return {
+        "cmd": cmd,
+        "args": data.get("args") or {},
+        "say": (data.get("say") or "").strip(),
+    }
+
+
+_OBSERVABLE_TYPE_MAP: dict[str, str] = {
+    "domain": "Domain-Name", "domain-name": "Domain-Name",
+    "hostname": "Hostname",
+    "ip": "IPv4-Addr", "ipv4": "IPv4-Addr",
+    "ipv6": "IPv6-Addr",
+    "url": "Url",
+    "email": "Email-Addr", "email-addr": "Email-Addr",
+    "md5": "StixFile", "sha1": "StixFile", "sha256": "StixFile",
+    "hash": "StixFile", "file": "StixFile",
+    "user-agent": "User-Agent",
+    "mutex": "Mutex",
+    "registry-key": "Windows-Registry-Key",
+}
+
+
+class OpenCTIClient:
+    """Async GraphQL client for a Railway-hosted OpenCTI."""
+
+    def __init__(self, bridge: "DesktopBridge") -> None:
+        self._bridge = bridge
+        self._base_url = os.environ.get("OPENCTI_URL", "").rstrip("/")
+        self._token = os.environ.get("OPENCTI_TOKEN", "")
+        self._client: httpx.AsyncClient | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    async def _ensure(self) -> httpx.AsyncClient:
+        async with self._lock:
+            if self._client is not None:
+                return self._client
+            if not (self._base_url and self._token):
+                raise RuntimeError(
+                    "OpenCTI unavailable — OPENCTI_URL / OPENCTI_TOKEN "
+                    "are not set on the worker"
+                )
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=httpx.Timeout(30.0, connect=8.0),
+            )
+            logger.info("opencti: client initialised for %s", self._base_url)
+            return self._client
+
+    async def _gql(self, query: str, variables: dict | None = None) -> dict:
+        client = await self._ensure()
+        resp = await client.post(
+            "/graphql",
+            json={"query": query, "variables": variables or {}},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "errors" in data and data["errors"]:
+            raise RuntimeError(f"opencti errors: {data['errors'][:2]}")
+        return data.get("data") or {}
+
+    async def search(self, query: str, limit: int = 10) -> dict:
+        gql = """
+        query Search($search: String, $count: Int) {
+          stixCoreObjects(search: $search, first: $count) {
+            edges {
+              node {
+                id
+                entity_type
+                representative { main secondary }
+              }
+            }
+          }
+        }
+        """
+        data = await self._gql(gql, {"search": query, "count": limit})
+        edges = (data.get("stixCoreObjects") or {}).get("edges") or []
+        return {
+            "matches": [
+                {
+                    "id": (e.get("node") or {}).get("id"),
+                    "type": (e.get("node") or {}).get("entity_type"),
+                    "name": (
+                        ((e.get("node") or {}).get("representative") or {})
+                        .get("main") or ""
+                    ),
+                }
+                for e in edges
+            ],
+            "query": query,
+        }
+
+    async def add_observable(self, value: str, raw_type: str) -> dict:
+        obs_type = _OBSERVABLE_TYPE_MAP.get(
+            (raw_type or "").strip().lower(), raw_type or ""
+        )
+        if not obs_type:
+            raise RuntimeError(f"unknown observable type '{raw_type}'")
+        type_to_key: dict[str, str] = {
+            "Domain-Name": "DomainName", "Hostname": "Hostname",
+            "IPv4-Addr": "IPv4Addr", "IPv6-Addr": "IPv6Addr",
+            "Url": "Url", "Email-Addr": "EmailAddr",
+            "StixFile": "StixFile", "User-Agent": "UserAgent",
+            "Mutex": "Mutex",
+            "Windows-Registry-Key": "WindowsRegistryKey",
+        }
+        key = type_to_key.get(obs_type, obs_type.replace("-", ""))
+        if obs_type == "StixFile":
+            inner: dict = {
+                "name": value,
+                "hashes": [{"algorithm": "Unknown", "hash": value}],
+            }
+        elif obs_type == "Windows-Registry-Key":
+            inner = {"attribute_key": value}
+        else:
+            inner = {"value": value}
+        gql = """
+        mutation AddObs($input: StixCyberObservableAddInput!) {
+          stixCyberObservableAdd(input: $input) {
+            id
+            observable_value
+            entity_type
+          }
+        }
+        """
+        data = await self._gql(
+            gql, {"input": {"type": obs_type, key: inner}}
+        )
+        obs = data.get("stixCyberObservableAdd") or {}
+        return {
+            "id": obs.get("id"),
+            "value": obs.get("observable_value") or value,
+            "type": obs.get("entity_type") or obs_type,
+        }
+
+    async def create_incident(self, name: str, description: str = "") -> dict:
+        gql = """
+        mutation IncAdd($input: IncidentAddInput!) {
+          incidentAdd(input: $input) { id name }
+        }
+        """
+        data = await self._gql(
+            gql, {"input": {"name": name, "description": description}}
+        )
+        inc = data.get("incidentAdd") or {}
+        return {"id": inc.get("id"), "name": inc.get("name")}
+
+    async def link(self, from_id: str, to_id: str, rel: str = "related-to") -> dict:
+        gql = """
+        mutation RelAdd($input: StixCoreRelationshipAddInput!) {
+          stixCoreRelationshipAdd(input: $input) { id relationship_type }
+        }
+        """
+        data = await self._gql(
+            gql,
+            {"input": {"fromId": from_id, "toId": to_id, "relationship_type": rel}},
+        )
+        r = data.get("stixCoreRelationshipAdd") or {}
+        return {
+            "id": r.get("id"),
+            "relationship": r.get("relationship_type") or rel,
+        }
+
+    async def summary(self, hours: int = 24) -> dict:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=hours)
+        ).isoformat()
+        gql = """
+        query Summary($filters: FilterGroup) {
+          stixCoreObjects(
+            filters: $filters, first: 8,
+            orderBy: created_at, orderMode: desc
+          ) {
+            pageInfo { globalCount }
+            edges { node { entity_type representative { main } } }
+          }
+        }
+        """
+        filters = {
+            "mode": "and",
+            "filters": [
+                {"key": "created_at", "operator": "gt", "values": [cutoff]}
+            ],
+            "filterGroups": [],
+        }
+        data = await self._gql(gql, {"filters": filters})
+        block = data.get("stixCoreObjects") or {}
+        total = (block.get("pageInfo") or {}).get("globalCount", 0)
+        edges = block.get("edges") or []
+        return {
+            "window_hours": hours,
+            "total": total,
+            "recent": [
+                {
+                    "type": (e.get("node") or {}).get("entity_type"),
+                    "name": (
+                        ((e.get("node") or {}).get("representative") or {})
+                        .get("main", "")
+                    ),
+                }
+                for e in edges
+            ],
+        }
+
+    async def list_indicators(self, limit: int = 10) -> dict:
+        gql = """
+        query Inds($count: Int) {
+          indicators(first: $count, orderBy: created_at, orderMode: desc) {
+            edges { node { id name x_opencti_score } }
+          }
+        }
+        """
+        data = await self._gql(gql, {"count": limit})
+        edges = (data.get("indicators") or {}).get("edges") or []
+        return {
+            "indicators": [
+                {
+                    "id": (e.get("node") or {}).get("id"),
+                    "name": (e.get("node") or {}).get("name"),
+                    "score": (e.get("node") or {}).get("x_opencti_score"),
+                }
+                for e in edges
+            ],
+        }
+
+    async def get_observable(self, obs_id: str) -> dict:
+        gql = """
+        query GetObs($id: String!) {
+          stixCyberObservable(id: $id) {
+            id observable_value entity_type x_opencti_score
+            externalReferences {
+              edges { node { source_name url description } }
+            }
+            objectLabel { value color }
+          }
+        }
+        """
+        data = await self._gql(gql, {"id": obs_id})
+        obs = data.get("stixCyberObservable") or {}
+        refs = (obs.get("externalReferences") or {}).get("edges") or []
+        labels = obs.get("objectLabel") or []
+        return {
+            "id": obs.get("id"),
+            "value": obs.get("observable_value"),
+            "type": obs.get("entity_type"),
+            "score": obs.get("x_opencti_score"),
+            "refs": [
+                {
+                    "source": (e.get("node") or {}).get("source_name"),
+                    "url": (e.get("node") or {}).get("url"),
+                    "description": (
+                        (e.get("node") or {}).get("description") or ""
+                    )[:200],
+                }
+                for e in refs
+            ],
+            "labels": [
+                {"value": lab.get("value"), "color": lab.get("color")}
+                for lab in labels
+            ],
+        }
+
+    async def enrich(
+        self, value: str, obs_type: str, deadline_s: float = 30.0
+    ) -> dict:
+        added = await self.add_observable(value, obs_type)
+        obs_id = added.get("id")
+        if not obs_id:
+            return {"error": "could not create observable", **added}
+        end = time.time() + deadline_s
+        attempts = 0
+        last: dict = {}
+        while time.time() < end:
+            attempts += 1
+            try:
+                last = await self.get_observable(obs_id)
+            except Exception:  # noqa: BLE001
+                pass
+            if last.get("refs") or last.get("labels") or last.get("score"):
+                last["enrichment_attempts"] = attempts
+                return last
+            await asyncio.sleep(5.0)
+        if not last:
+            last = added
+        last["enrichment_attempts"] = attempts
+        last["timed_out"] = True
+        return last
+
+
+def _cti_reply(cmd: str, args: dict, res: dict) -> str:
+    """Format an OpenCTI result into a single butler sentence."""
+    if not isinstance(res, dict) or res.get("error"):
+        err = res.get("error") if isinstance(res, dict) else "no response"
+        return f"OpenCTI hiccup, sir — {err}"
+    if cmd == "cti_search":
+        matches = res.get("matches") or []
+        if not matches:
+            q = args.get("query", "that")
+            return f"Nothing in the intel for '{q}', sir."
+        head = ", ".join(
+            f"{m.get('name','?')} ({m.get('type','')})"
+            for m in matches[:5]
+        )
+        return f"{len(matches)} hits, sir — {head}."
+    if cmd == "cti_add_observable":
+        return (
+            f"Logged {args.get('value', res.get('value', 'it'))} as a "
+            f"{args.get('observable_type', res.get('type', 'observable'))}, sir."
+        )
+    if cmd == "cti_create_incident":
+        return (
+            f"Incident '{args.get('name', res.get('name', 'unnamed'))}' "
+            "is on the books, sir."
+        )
+    if cmd == "cti_link":
+        rel = args.get("relationship") or res.get("relationship") or "related-to"
+        return f"Linked, sir — {rel}."
+    if cmd == "cti_summary":
+        total = res.get("total", 0)
+        hours = res.get("window_hours", args.get("hours", 24))
+        if not total:
+            return f"Nothing new in the last {hours} hours, sir."
+        recent = res.get("recent") or []
+        names = ", ".join(
+            r.get("name", r.get("type", "?")) for r in recent[:3]
+        )
+        return (
+            f"{total} new objects in the last {hours} hours, sir — "
+            f"latest: {names}."
+        )
+    if cmd == "cti_list_indicators":
+        items = res.get("indicators") or []
+        if not items:
+            return "No recent indicators, sir."
+        return (
+            f"{len(items)} recent indicators, sir — "
+            + ", ".join(i.get("name", "?") for i in items[:4])
+            + "."
+        )
+    if cmd == "cti_enrich":
+        value = args.get("value") or res.get("value") or "that"
+        refs = res.get("refs") or []
+        labels = res.get("labels") or []
+        score = res.get("score")
+        if not refs and not labels and score is None:
+            if res.get("timed_out"):
+                return (
+                    f"Logged {value}, sir, but no enrichment came back "
+                    "in the window — the connectors may be cold."
+                )
+            return f"Logged {value}, sir. No findings yet."
+        bits: list[str] = []
+        if score is not None:
+            bits.append(f"score {score}")
+        sources = []
+        for r in refs:
+            s = r.get("source") or ""
+            if s and s not in sources:
+                sources.append(s)
+            if len(sources) >= 3:
+                break
+        if sources:
+            bits.append("flagged by " + ", ".join(sources))
+        if labels:
+            label_words = [lab.get("value", "") for lab in labels[:3]]
+            label_words = [w for w in label_words if w]
+            if label_words:
+                bits.append("labels " + " / ".join(label_words))
+        summary = "; ".join(bits) if bits else "no clear verdict"
+        return f"{value} — {summary}, sir."
+    if cmd == "cti_open_panel":
+        return "Intelligence panel is up, sir."
+    if cmd == "cti_spinup":
+        return (
+            "On it, sir — Global Eyes coming online, give me about three "
+            "minutes."
+        )
+    if cmd == "cti_spindown":
+        return "Powering down Global Eyes, sir."
+    return "Done, sir."
+
+
+_CTI_IDLE_SECONDS = 180
+
+
+def _is_offline_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+            httpx.PoolTimeout,
+        ),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (502, 503, 504)
+    msg = str(exc).lower()
+    return any(
+        tok in msg
+        for tok in (
+            "connect", "connection refused", "no route",
+            "name or service not known", "temporarily unavailable",
+            "502", "503", "504",
+        )
+    )
+
+
+class GitHubDispatchClient:
+    """Fires a workflow_dispatch on the OpenCTI lifecycle workflow."""
+
+    def __init__(self) -> None:
+        self._token = os.environ.get("GITHUB_DISPATCH_TOKEN", "")
+        self._owner = os.environ.get("GITHUB_DISPATCH_OWNER", "gelson12")
+        self._repo = os.environ.get(
+            "GITHUB_DISPATCH_REPO", "friday_jarvis2"
+        )
+        self._workflow = os.environ.get(
+            "GITHUB_DISPATCH_WORKFLOW", "opencti-lifecycle.yml"
+        )
+        self._ref = os.environ.get("GITHUB_DISPATCH_REF", "main")
+        self._client: httpx.AsyncClient | None = None
+        self._lock = asyncio.Lock()
+
+    async def _ensure(self) -> httpx.AsyncClient | None:
+        async with self._lock:
+            if self._client is not None:
+                return self._client
+            if not self._token:
+                logger.warning(
+                    "gh dispatch: GITHUB_DISPATCH_TOKEN not set; OpenCTI "
+                    "lifecycle commands will fail until you add it"
+                )
+                return None
+            self._client = httpx.AsyncClient(
+                base_url="https://api.github.com",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self._token}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=httpx.Timeout(15.0, connect=10.0),
+            )
+            logger.info(
+                "gh dispatch: ready (%s/%s :: %s on %s)",
+                self._owner, self._repo, self._workflow, self._ref,
+            )
+            return self._client
+
+    async def dispatch(self, action: str) -> tuple[bool, str]:
+        if action not in ("start", "stop"):
+            return False, f"invalid action '{action}'"
+        client = await self._ensure()
+        if client is None:
+            return False, "GITHUB_DISPATCH_TOKEN is not set on the worker"
+        try:
+            resp = await client.post(
+                f"/repos/{self._owner}/{self._repo}/actions/workflows/"
+                f"{self._workflow}/dispatches",
+                json={"ref": self._ref, "inputs": {"action": action}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"gh dispatch network error: {exc}"
+        if resp.status_code == 204:
+            return True, ""
+        return False, (
+            f"gh dispatch returned {resp.status_code}: "
+            f"{resp.text[:200]}"
+        )
+
+
 class Assistant(Agent):
     def __init__(self, room: rtc.Room):
         super().__init__(instructions=AGENT_INSTRUCTION)
         self._room = room
         self._desktop = DesktopBridge()
+        self._mobile = MobileBridge()
+        # OpenCTI — Railway-hosted, reached via direct httpx. Lifecycle
+        # (spinup/spindown) goes through GitHub Actions workflow_dispatch
+        # on the opencti-lifecycle workflow in this same repo.
+        self._cti = OpenCTIClient(self._desktop)
+        self._gh = GitHubDispatchClient()
+        # CTI lifecycle state — see _cti_spinup, _cti_idle_watch.
+        self._cti_up: bool = False
+        self._cti_last_active: float = 0.0
+        self._cti_idle_task: asyncio.Task | None = None
         # Wake/sleep: dormant on connect, woken by "Hey Friday".
         self._awake = False
         # First-wake greeting includes bridge presence so the user knows
@@ -1736,6 +2696,255 @@ class Assistant(Agent):
             "laptop and the ROG are online and at your command."
         )
 
+    # ── CTI panel + lifecycle ───────────────────────────────────────
+
+    async def _open_cti_panel(
+        self, dashboard: str | None = None, path: str | None = None
+    ) -> None:
+        """Publish an `open_widget` for the cti panel on the jarvis-ui topic."""
+        payload: dict = {}
+        cti_url = os.environ.get("OPENCTI_URL", "").rstrip("/")
+        if cti_url:
+            payload["url"] = cti_url
+        if path:
+            payload["path"] = path
+        if dashboard:
+            payload["dashboard"] = dashboard
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "cti",
+                "title": "Intelligence",
+                "payload": payload,
+            }
+        )
+
+    async def _maybe_handle_cti(self, text: str) -> bool:
+        """Operate OpenCTI via the LLM intent router (Path Y)."""
+        if not text or not _CTI_HINT_RE.search(text):
+            return False
+
+        # Fast path — pure panel-open intent skips the LLM call.
+        if _CTI_OPEN_RE.search(text):
+            await self._open_cti_panel()
+            try:
+                await self.session.say("Intelligence panel is up, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        routed = await _route_cti(text)
+        if routed is None:
+            return False
+        cmd = routed["cmd"]
+        args = routed["args"] or {}
+        say_hint = routed.get("say", "")
+
+        # Lifecycle short-circuits (no auto-spinup wrapper).
+        if cmd == "cti_spinup":
+            await self._cti_spinup()
+            return True
+        if cmd == "cti_spindown":
+            await self._cti_spindown()
+            return True
+
+        # Quick ack for ops that aren't info-rich.
+        info_cmds = {
+            "cti_search", "cti_summary", "cti_list_indicators", "cti_enrich"
+        }
+        if say_hint and cmd not in info_cmds:
+            try:
+                await self.session.say(say_hint)
+            except Exception:  # noqa: BLE001
+                pass
+
+        async def _run() -> dict:
+            if cmd == "cti_search":
+                return await self._cti.search(
+                    str(args.get("query", "")),
+                    int(args.get("limit") or 10),
+                )
+            if cmd == "cti_add_observable":
+                return await self._cti.add_observable(
+                    str(args.get("value", "")),
+                    str(args.get("observable_type", "")),
+                )
+            if cmd == "cti_create_incident":
+                return await self._cti.create_incident(
+                    str(args.get("name", "")),
+                    str(args.get("description", "")),
+                )
+            if cmd == "cti_link":
+                return await self._cti.link(
+                    str(args.get("from_id", "")),
+                    str(args.get("to_id", "")),
+                    str(args.get("relationship") or "related-to"),
+                )
+            if cmd == "cti_summary":
+                return await self._cti.summary(int(args.get("hours") or 24))
+            if cmd == "cti_list_indicators":
+                return await self._cti.list_indicators(
+                    int(args.get("limit") or 10)
+                )
+            if cmd == "cti_enrich":
+                return await self._cti.enrich(
+                    str(args.get("value", "")),
+                    str(args.get("observable_type", "")),
+                )
+            if cmd == "cti_open_panel":
+                await self._open_cti_panel(
+                    dashboard=args.get("dashboard"),
+                    path=args.get("path"),
+                )
+                return {"opened": True}
+            return {"error": f"unknown cti command '{cmd}'"}
+
+        res: dict
+        try:
+            res = await _run()
+        except Exception as exc:  # noqa: BLE001
+            if _is_offline_error(exc):
+                logger.info("cti %s offline (%s) — auto-spinup", cmd, exc)
+                try:
+                    await self.session.say(
+                        "Bringing Global Eyes online first, sir — one moment."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                up = await self._cti_spinup(quiet=True)
+                if up:
+                    try:
+                        res = await _run()
+                    except Exception as exc2:  # noqa: BLE001
+                        logger.error("cti %s retry failed: %s", cmd, exc2)
+                        res = {"error": f"retry after spinup failed: {exc2}"}
+                else:
+                    res = {"error": "auto-spinup did not complete in time"}
+            else:
+                logger.error("cti %s failed: %s", cmd, exc)
+                res = {"error": str(exc)}
+
+        if isinstance(res, dict) and not res.get("error"):
+            self._cti_last_active = time.time()
+
+        try:
+            await self.session.say(_cti_reply(cmd, args, res))
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _cti_spinup(self, quiet: bool = False) -> bool:
+        """Trigger workflow_dispatch start, then poll until healthy."""
+        ok, why = await self._gh.dispatch("start")
+        if not ok:
+            try:
+                await self.session.say(
+                    f"I couldn't kick off the spin-up, sir — {why}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+        if not quiet:
+            try:
+                await self.session.say(
+                    "On it, sir — Global Eyes coming online, give me "
+                    "about three minutes."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        healthy = await self._wait_until_cti_healthy()
+        if healthy:
+            self._cti_up = True
+            self._cti_last_active = time.time()
+            if self._cti_idle_task is None or self._cti_idle_task.done():
+                self._cti_idle_task = asyncio.create_task(
+                    self._cti_idle_watch()
+                )
+            try:
+                if not quiet:
+                    await self.session.say("Global Eyes are online, sir.")
+                await self._open_cti_panel()
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            try:
+                await self.session.say(
+                    "Global Eyes didn't come up in time, sir — check the "
+                    "Railway dashboard."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return healthy
+
+    async def _cti_spindown(self) -> None:
+        """Trigger workflow_dispatch stop + clean up local state."""
+        self._cti_up = False
+        if self._cti_idle_task is not None:
+            self._cti_idle_task.cancel()
+            self._cti_idle_task = None
+        ok, why = await self._gh.dispatch("stop")
+        if not ok:
+            try:
+                await self.session.say(
+                    f"Couldn't fire the spin-down, sir — {why}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            await self._publish_ui(
+                {"type": "close_widget", "kind": "cti"}
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await self.session.say("Powering down Global Eyes, sir.")
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _wait_until_cti_healthy(
+        self, deadline_s: float = 420.0
+    ) -> bool:
+        """Poll OpenCTI's GraphQL ping every 10s up to ``deadline_s``."""
+        end = time.time() + deadline_s
+        attempts = 0
+        while time.time() < end:
+            attempts += 1
+            try:
+                await self._cti._gql("{ me { name } }")
+                logger.info("cti healthy after %d probes", attempts)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("cti probe %d not yet healthy: %s", attempts, exc)
+            await asyncio.sleep(10.0)
+        return False
+
+    async def _cti_idle_watch(self) -> None:
+        """Tear OpenCTI down after _CTI_IDLE_SECONDS of inactivity."""
+        try:
+            while self._cti_up:
+                await asyncio.sleep(30.0)
+                if not self._cti_up:
+                    return
+                idle = time.time() - self._cti_last_active
+                if idle >= _CTI_IDLE_SECONDS:
+                    minutes = max(1, int(_CTI_IDLE_SECONDS // 60))
+                    word = "minute" if minutes == 1 else "minutes"
+                    try:
+                        await self.session.say(
+                            f"Global Eyes has been idle for over "
+                            f"{minutes} {word}, sir — powering down to "
+                            "save computational resources."
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await self._cti_spindown()
+                    return
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("cti idle watch crashed: %s", exc)
+
     async def _maybe_handle_desktop(self, text: str) -> bool:
         """Operate the user's Windows machines via the LLM intent router.
 
@@ -1798,6 +3007,143 @@ class Assistant(Agent):
             res = {"error": str(exc)}
         try:
             await self.session.say(_desktop_reply(machine, cmd, args, res))
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _maybe_handle_mobile(self, text: str) -> bool:
+        """Operate the user's Android phone via the mobile-bridge APK.
+
+        Pipeline: broad hint gate → LLM router (free-form → structured
+        command) → optional contacts_search resolve → bridge.send →
+        speak butler-tone reply.
+        """
+        if not text or not _MOBILE_HINT_RE.search(text):
+            return False
+
+        try:
+            await self._mobile._ensure()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mobile control-room connect failed: %s", exc)
+        online = self._mobile.online_phones()
+        routed = await _route_mobile(text, online)
+        if routed is None:
+            return False
+
+        if not online:
+            try:
+                await self.session.say(
+                    "Your phone bridge isn't connected, sir — open Jarvis "
+                    "Mobile Bridge and connect."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        phone = routed["phone"] if routed.get("phone") != "any" else online[0]
+        cmd = routed["cmd"]
+        args = dict(routed.get("args") or {})
+
+        # Two-step contact resolution: if the LLM gave us a contact_query
+        # instead of a number for a send/dial intent, look it up first.
+        contact_query = routed.get("contact_query", "")
+        if (
+            cmd in ("sms_send", "dial", "whatsapp_send")
+            and not args.get("number")
+            and contact_query
+        ):
+            search = await self._mobile.send(
+                phone, "contacts_search",
+                {"query": contact_query, "limit": 3},
+                timeout=10.0,
+            )
+            contacts = search.get("contacts") or []
+            if not contacts:
+                try:
+                    await self.session.say(
+                        f"I couldn't find a contact for '{contact_query}', sir."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return True
+            args["number"] = contacts[0]["number"]
+
+        say_hint = routed.get("say", "")
+        if say_hint:
+            try:
+                await self.session.say(say_hint)
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            res = await self._mobile.send(phone, cmd, args, timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("mobile send failed: %s", exc)
+            res = {"error": str(exc)}
+        try:
+            await self.session.say(_mobile_reply(phone, cmd, args, res))
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _maybe_handle_telegram(self, text: str) -> bool:
+        """Send a Telegram message via the official Bot API.
+
+        Worker-side only — does NOT need the phone bridge to be online.
+        Requires `TELEGRAM_BOT_TOKEN` env + `TELEGRAM_CONTACTS_JSON` env
+        mapping `{"<name lowercased>": <chat_id>, ...}`.
+        """
+        if not text or not _TELEGRAM_RE.search(text):
+            return False
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        if not token:
+            try:
+                await self.session.say(
+                    "Telegram isn't configured, sir — the bot token is unset."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        extracted = await _extract_telegram_payload(text)
+        if not extracted:
+            return False
+        contact_name = extracted["contact"].lower().strip()
+        message = extracted["message"].strip()
+
+        try:
+            contacts = json.loads(
+                os.environ.get("TELEGRAM_CONTACTS_JSON", "{}") or "{}"
+            )
+        except Exception:  # noqa: BLE001
+            contacts = {}
+        chat_id = contacts.get(contact_name)
+        if not chat_id:
+            try:
+                await self.session.say(
+                    f"I don't have a Telegram chat id for '{contact_name}', sir."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": message},
+                )
+                r.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("telegram send failed: %s", exc)
+            try:
+                await self.session.say("Telegram didn't accept that, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        try:
+            await self.session.say(f"Telegrammed {contact_name}, sir.")
         except Exception:  # noqa: BLE001
             pass
         return True
@@ -2280,8 +3626,22 @@ class Assistant(Agent):
         if await self._maybe_handle_content(text):
             raise StopResponse()
 
+        # ── Intelligence — OpenCTI graph operations (Global Eyes) ─────
+        # Runs BEFORE desktop so "log foo.com as suspicious" doesn't get
+        # mistaken for a file op.
+        if await self._maybe_handle_cti(text):
+            raise StopResponse()
+
         # ── Desktop control — operate the user's Windows machines ────
         if await self._maybe_handle_desktop(text):
+            raise StopResponse()
+
+        # ── Mobile control — operate the user's Android phone ────────
+        if await self._maybe_handle_mobile(text):
+            raise StopResponse()
+
+        # ── Telegram (worker-side Bot API; no phone required) ────────
+        if await self._maybe_handle_telegram(text):
             raise StopResponse()
 
         # ── Screen widgets (open/close panels on request) ────────────

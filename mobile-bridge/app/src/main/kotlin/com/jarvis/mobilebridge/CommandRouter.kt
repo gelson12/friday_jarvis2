@@ -1,0 +1,39 @@
+package com.jarvis.mobilebridge
+
+import android.content.Context
+import com.jarvis.mobilebridge.handlers.AppHandler
+import com.jarvis.mobilebridge.handlers.BrowserHandler
+import com.jarvis.mobilebridge.handlers.ContactsHandler
+import com.jarvis.mobilebridge.handlers.DeviceStatusHandler
+import com.jarvis.mobilebridge.handlers.DialHandler
+import com.jarvis.mobilebridge.handlers.HostInfoHandler
+import com.jarvis.mobilebridge.handlers.SmsHandler
+import com.jarvis.mobilebridge.handlers.WhatsAppHandler
+import org.json.JSONObject
+
+/**
+ * Maps a `cmd` name to its handler. Mirrors desktop-bridge/bridge.py's
+ * _HANDLERS dict. Handlers return a JSONObject; the LiveKitClient
+ * wraps it as `{"id", "machine", "result": <handler_output>}`.
+ */
+class CommandRouter(private val ctx: Context) {
+    suspend fun execute(cmd: String, args: JSONObject): JSONObject = try {
+        when (cmd) {
+            "host_info" -> HostInfoHandler.execute(ctx, args)
+            "sms_list" -> SmsHandler.list(ctx, args)
+            "sms_send" -> SmsHandler.send(ctx, args)
+            "contacts_search" -> ContactsHandler.search(ctx, args)
+            "dial" -> DialHandler.execute(ctx, args)
+            "open_app" -> AppHandler.open(ctx, args)
+            "list_apps" -> AppHandler.list(ctx, args)
+            "install_app" -> AppHandler.install(ctx, args)
+            "uninstall_app" -> AppHandler.uninstall(ctx, args)
+            "open_url" -> BrowserHandler.openUrl(ctx, args)
+            "whatsapp_send" -> WhatsAppHandler.send(ctx, args)
+            "device_status" -> DeviceStatusHandler.execute(ctx, args)
+            else -> JSONObject().put("error", "unknown command '$cmd'")
+        }
+    } catch (e: Exception) {
+        JSONObject().put("error", e.message ?: "unknown error")
+    }
+}
