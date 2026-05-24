@@ -7,6 +7,7 @@ import type { WidgetComponentProps, WidgetKind } from '@/lib/jarvis-ui/protocol'
 import { BrowserWidget } from './browser-widget';
 import { ChatWidget } from './chat-widget';
 import { ClockWidget } from './clock-widget';
+import { CTIWidget } from './cti-widget';
 import { MapsWidget } from './maps-widget';
 import { NewsWidget } from './news-widget';
 import { PlaceholderWidget } from './placeholder-widget';
@@ -23,6 +24,7 @@ const REGISTRY: Partial<Record<WidgetKind, ComponentType<WidgetComponentProps>>>
   maps: MapsWidget,
   browser: BrowserWidget,
   site: SiteWidget,
+  cti: CTIWidget,
 };
 
 export function getWidgetComponent(

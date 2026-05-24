@@ -43,7 +43,11 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
+          # Core platform + 7 OSINT connectors. Connectors are
+          # lightweight (~200 MB each) so spinning them up alongside
+          # the core stack adds ~$0.15/hr; missing API keys make a
+          # connector log + exit cleanly, not block the start.
           python .github/scripts/railway_schedule.py \
             --action "${{ inputs.action }}" \
             --project "divine-contentment" \
-            --services "opencti,opencti-worker,elasticsearch,redis,rabbitmq,minio"
+            --services "opencti,opencti-worker,elasticsearch,redis,rabbitmq,minio,connector-mitre,connector-cisa-kev,connector-urlhaus,connector-alienvault,connector-abuseipdb,connector-virustotal,connector-shodan-internetdb"
