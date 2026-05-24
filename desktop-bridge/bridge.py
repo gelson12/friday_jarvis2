@@ -566,6 +566,99 @@ def _cmd_lock_workstation(_args: dict) -> dict:
         return {"error": str(exc)}
 
 
+# Lifts the cap for HTTP proxy responses — GraphQL search results can
+# legitimately push past _MAX_RESULT but stay comfortably below LiveKit's
+# ~1 MB reliable-data ceiling.
+_HTTP_PROXY_MAX = 700_000
+
+
+def _cmd_http_proxy(args: dict) -> dict:
+    """Proxy an HTTP request to a service on THIS machine.
+
+    Lets a cloud-side caller (the OpenJarvis voice worker / backend) talk
+    to a service running locally on this PC — OpenCTI on localhost:8080
+    being the motivating case — WITHOUT exposing the service to the
+    public internet. The request rides the existing LiveKit data
+    channel; the response rides back the same way.
+
+    args:
+      base_url  — full base URL (default: 'http://localhost:8080')
+      method    — GET | POST | PUT | PATCH | DELETE (default GET)
+      path      — request path including leading '/'  (default '/')
+      headers   — dict of request headers (optional)
+      body      — JSON-serialisable body (POST/PUT/PATCH) (optional)
+      timeout   — seconds (default 30, max 120)
+
+    Returns:
+      {status, headers, body, json?}
+      `json` set when content-type indicates JSON; `body` is the text.
+    """
+    try:
+        import urllib.request
+        import urllib.error
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"stdlib urllib unavailable: {exc}"}
+
+    base_url = (args.get("base_url") or "http://localhost:8080").rstrip("/")
+    path = args.get("path") or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    url = base_url + path
+    method = (args.get("method") or "GET").upper()
+    timeout = min(120.0, float(args.get("timeout", 30.0)))
+
+    headers = dict(args.get("headers") or {})
+    body = args.get("body")
+    raw: bytes | None = None
+    if body is not None:
+        if isinstance(body, (dict, list)):
+            raw = json.dumps(body).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
+        elif isinstance(body, str):
+            raw = body.encode("utf-8")
+        elif isinstance(body, bytes):
+            raw = body
+        else:
+            return {"error": f"unsupported body type {type(body).__name__}"}
+
+    req = urllib.request.Request(
+        url, data=raw, method=method, headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            resp_headers = {k: v for k, v in resp.headers.items()}
+            data = resp.read(_HTTP_PROXY_MAX + 1)
+    except urllib.error.HTTPError as exc:
+        # Treat HTTP errors as a normal proxied response — the caller
+        # cares about the status, not whether urllib raised.
+        status = exc.code
+        resp_headers = {k: v for k, v in exc.headers.items()} if exc.headers else {}
+        try:
+            data = exc.read(_HTTP_PROXY_MAX + 1)
+        except Exception:  # noqa: BLE001
+            data = b""
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "url": url}
+
+    truncated = len(data) > _HTTP_PROXY_MAX
+    body_bytes = data[:_HTTP_PROXY_MAX]
+    text = body_bytes.decode("utf-8", errors="replace")
+    out: dict = {
+        "status": status,
+        "headers": resp_headers,
+        "body": text,
+        "truncated": truncated,
+    }
+    ctype = (resp_headers.get("Content-Type") or "").lower()
+    if "application/json" in ctype or "json" in ctype:
+        try:
+            out["json"] = json.loads(text)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 _HANDLERS = {
     "host_info": _cmd_host_info,
     "shell": _cmd_shell,
@@ -586,6 +679,7 @@ _HANDLERS = {
     "media_key": _cmd_media_key,
     "play_media": _cmd_play_media,
     "lock_workstation": _cmd_lock_workstation,
+    "http_proxy": _cmd_http_proxy,
 }
 
 
