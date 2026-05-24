@@ -74,6 +74,37 @@ _CAMERA_RE = re.compile(
 )
 
 
+# ── Camera enable/disable (voice intent) ─────────────────────────────
+# Distinct concern from the vision routing above: this controls whether
+# the user's camera TRACK is on or off. Structured command published on
+# the `ui-command` topic; the frontend hook calls
+# `localParticipant.setCameraEnabled(...)`. Mirrors OpenJarvis.
+UI_COMMAND_TOPIC = "ui-command"
+
+_CAM_WORD = re.compile(r"\b(camera|cam|webcam|video)\b", re.I)
+_CAM_OFF = re.compile(
+    r"\b(off|disable|stop|close|kill|hide|turn it off|shut)\b", re.I
+)
+_CAM_ON = re.compile(
+    r"\b(on|enable|start|open|show|turn it on|activate)\b", re.I
+)
+
+
+def _camera_intent(text: str):
+    """Return True (turn on), False (turn off), or None (not a camera cmd).
+
+    'off' wins if both polarities somehow appear in the same utterance
+    ("turn the camera off, not on").
+    """
+    if not text or not _CAM_WORD.search(text):
+        return None
+    if _CAM_OFF.search(text):
+        return False
+    if _CAM_ON.search(text):
+        return True
+    return None
+
+
 # ── Screen widgets (floating HUD panels) ─────────────────────────────
 # The browser renders draggable, semi-transparent widget panels. The
 # worker summons them by publishing a JSON command on the `jarvis-ui`
@@ -212,9 +243,24 @@ def _content_intent(text: str):
         q = re.sub(r"\b(?:videos?|clips?|footage)\b", " ", q, flags=re.I)
         return ("youtube", _clean_query(q))
 
-    if _NEWS_RE.search(low) and (_CONTENT_VERB.search(low) or "headlines" in low):
+    if _NEWS_RE.search(low) and (
+        _CONTENT_VERB.search(low)
+        or "headlines" in low
+        # Bare-noun triggers so "what's the news", "any news",
+        # "tell me the news", "catch me up", "latest news" all fire.
+        or re.search(
+            r"\b(?:what(?:'?s)?|what\s+is|any|tell\s+me|"
+            r"catch\s+me\s+up|update\s+me|latest|breaking)\b",
+            low,
+        )
+    ):
         q = re.sub(r"\b(?:news|headlines)\b|\b(?:about|on|regarding)\b",
                    " ", t, flags=re.I)
+        q = re.sub(
+            r"\b(?:what(?:'?s)?|what\s+is|any|tell\s+me|"
+            r"catch\s+me\s+up|update\s+me|latest|breaking)\b",
+            " ", q, flags=re.I,
+        )
         return ("news", _clean_query(q))
 
     if _MAP_RE.search(low) and (
@@ -1135,6 +1181,32 @@ class Assistant(Agent):
         except Exception as exc:  # noqa: BLE001
             logger.error("jarvis-ui publish failed: %s", exc)
 
+    async def _maybe_handle_camera(self, text: str) -> bool:
+        """Voice-controlled camera enable/disable. Publishes a structured
+        JSON command on the `ui-command` topic; the frontend hook turns
+        the track on/off. Returns True when handled (caller stops the
+        turn). Mirrors OpenJarvis behaviour.
+        """
+        want = _camera_intent(text)
+        if want is None:
+            return False
+        try:
+            await self._room.local_participant.publish_data(
+                json.dumps({"type": "camera", "enabled": want}).encode("utf-8"),
+                reliable=True,
+                topic=UI_COMMAND_TOPIC,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ui-command camera publish failed: %s", exc)
+            return False
+        try:
+            await self.session.say(
+                "Camera on, sir." if want else "Camera off, sir."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     async def _maybe_handle_widget(self, text: str) -> None:
         """Open/close screen widgets when the user asks.
 
@@ -1722,13 +1794,25 @@ class Assistant(Agent):
         )
 
     async def show_news(self, topic: str = "") -> str:
-        """Show current news headlines on the JARVIS screen.
+        """Show current news headlines + a related news video, and speak
+        a top-headline summary. Mirrors OpenJarvis.
 
         Args:
-            topic: Optional subject to focus the news on (e.g.
-                "technology"). Leave empty for the top headlines.
+            topic: Optional subject (e.g. "technology"). Empty = top
+                headlines + a generic "breaking news today" video.
         """
-        articles = await search_tools.news_search(topic, limit=8)
+        topic = (topic or "").strip()
+        video_query = topic or "breaking news today"
+
+        try:
+            articles, videos = await asyncio.gather(
+                search_tools.news_search(topic, limit=8),
+                search_tools.youtube_search(video_query, limit=8),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("news+video parallel fetch failed: %s", exc)
+            articles, videos = [], []
+
         await self._publish_ui(
             {
                 "type": "open_widget",
@@ -1737,10 +1821,46 @@ class Assistant(Agent):
                 "payload": {"query": topic, "articles": articles},
             }
         )
+
+        if videos:
+            async def _open_video_after_summary() -> None:
+                try:
+                    await asyncio.sleep(4.0)
+                    await self._publish_ui(
+                        {
+                            "type": "open_widget",
+                            "kind": "youtube",
+                            "title": f"News Video — {video_query}",
+                            "payload": {
+                                "query": video_query,
+                                "videos": videos,
+                            },
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("delayed news-video open failed: %s", exc)
+            asyncio.create_task(_open_video_after_summary())
+
         if not articles:
             return "I couldn't reach the news feed just now, sir."
+
+        top = articles[0] if articles else {}
+        top_title = (top.get("title") or "").strip()
+        top_source = (top.get("source") or "").strip()
         where = f" on {topic}" if topic else ""
-        return f"Here are {len(articles)} headlines{where}, sir."
+
+        if top_title:
+            lead = f"Top headline{where}: {top_title}"
+            lead += f", from {top_source}." if top_source else "."
+        else:
+            lead = f"Latest headlines{where} on screen, sir."
+
+        tail = (
+            "Video coming up in a moment, sir."
+            if videos
+            else f"That's {len(articles)} headlines on screen."
+        )
+        return f"{lead} {tail}"
 
     async def show_map(self, place: str) -> str:
         """Show a place, address, or directions on a map on the JARVIS
@@ -1988,6 +2108,13 @@ class Assistant(Agent):
 
         # ── Screen widgets (open/close panels on request) ────────────
         await self._maybe_handle_widget(text)
+
+        # ── Camera on/off ─────────────────────────────────────────────
+        # Structured command to the browser via the `ui-command` topic.
+        # Mirrors OpenJarvis. Camera intent only fires when the noun
+        # (camera|cam|webcam|video) AND a polarity verb both match.
+        if await self._maybe_handle_camera(text):
+            raise StopResponse()
 
         # ── Vision injection (only runs while awake) ─────────────────
         if not _is_vision_intent(text):
