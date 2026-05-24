@@ -1668,9 +1668,18 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
+    # Name the worker explicitly so LiveKit Cloud can route dispatch
+    # requests to it. The frontend's room-config sets
+    # `agents: [{ agent_name: "friday" }]`, and LiveKit dispatches the
+    # matching worker. Without a name on either side, a project with
+    # "explicit dispatch only" mode (or no auto-dispatch rule) will
+    # leave the worker registered but idle and the user stuck on the
+    # welcome screen — which is what was happening on Railway after
+    # the AGENT_NAME env var was cleared.
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
+            agent_name=os.getenv("AGENT_NAME", "friday"),
         )
     )
