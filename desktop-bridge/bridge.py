@@ -236,6 +236,173 @@ def _cmd_volume(args: dict) -> dict:
         return {"error": str(exc)}
 
 
+# Process names that produce noise in audio-session enumeration but
+# never correspond to a thing the user means when they say "mute X".
+_AUDIO_SESSION_SKIP = {"audiodg.exe", "system", ""}
+
+
+def _cmd_audio_sessions(_args: dict) -> dict:
+    """Enumerate per-application audio sessions (Windows).
+
+    Returns one entry per process that currently has an audio session,
+    each with: pid, process_name, display_name, volume (0-100), muted,
+    is_active (the session is actively rendering audio right now).
+
+    The caller (worker-side volume disambiguation) uses this to know
+    which apps are playing sound so it can ask "YouTube or Spotify, sir?"
+    instead of fumbling the wrong target.
+    """
+    try:
+        from comtypes import CoInitialize
+        from pycaw.pycaw import AudioUtilities
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"pycaw unavailable: {exc}", "sessions": []}
+
+    try:
+        CoInitialize()
+    except Exception:  # noqa: BLE001
+        pass
+
+    sessions_out: list[dict] = []
+    try:
+        for session in AudioUtilities.GetAllSessions():
+            try:
+                proc = session.Process
+                if proc is None:
+                    continue
+                name = (proc.name() or "").strip()
+                if name.lower() in _AUDIO_SESSION_SKIP:
+                    continue
+                # Session State: 0=Inactive, 1=Active, 2=Expired
+                try:
+                    state = int(getattr(session, "State", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    state = 0
+                if state == 2:
+                    continue
+                vol_ctrl = session.SimpleAudioVolume
+                try:
+                    scalar = float(vol_ctrl.GetMasterVolume())
+                except Exception:  # noqa: BLE001
+                    scalar = 0.0
+                try:
+                    muted = bool(vol_ctrl.GetMute())
+                except Exception:  # noqa: BLE001
+                    muted = False
+                display = (getattr(session, "DisplayName", "") or "").strip() or name
+                sessions_out.append({
+                    "pid": int(proc.pid),
+                    "process_name": name,
+                    "display_name": display,
+                    "volume": round(scalar * 100),
+                    "muted": muted,
+                    "is_active": state == 1,
+                })
+            except Exception:  # noqa: BLE001
+                # One bad session shouldn't kill the whole enumeration.
+                continue
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "sessions": []}
+
+    return {"sessions": sessions_out}
+
+
+def _cmd_app_volume(args: dict) -> dict:
+    """Per-application volume control (Windows).
+
+    args:
+      process_name — case-insensitive substring match against the
+                     audio-session process name ("spotify" matches
+                     "Spotify.exe"; "chrome" matches "chrome.exe").
+      action       — up | down | mute | unmute | set
+      level        — 0-100 for 'set'
+      step         — 0.0-1.0 for up/down (default 0.10)
+
+    When the substring matches multiple sessions (e.g. several Chrome
+    processes) the action is applied to all of them.
+    """
+    process_name = (args.get("process_name") or "").strip().lower()
+    if not process_name:
+        return {"error": "no process_name"}
+    action = (args.get("action") or "").strip().lower()
+    if action not in ("up", "down", "mute", "unmute", "set"):
+        return {"error": f"unknown app_volume action '{action}'"}
+
+    try:
+        from comtypes import CoInitialize
+        from pycaw.pycaw import AudioUtilities
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"pycaw unavailable: {exc}"}
+
+    try:
+        CoInitialize()
+    except Exception:  # noqa: BLE001
+        pass
+
+    step = max(0.0, min(1.0, float(args.get("step", 0.10))))
+    try:
+        level_int = int(args.get("level", 50))
+    except Exception:  # noqa: BLE001
+        level_int = 50
+    level_int = max(0, min(100, level_int))
+
+    matched: list[dict] = []
+    last_level: int | None = None
+    last_muted: bool | None = None
+
+    try:
+        for session in AudioUtilities.GetAllSessions():
+            try:
+                proc = session.Process
+                if proc is None:
+                    continue
+                name = (proc.name() or "").strip()
+                if not name or process_name not in name.lower():
+                    continue
+                vol_ctrl = session.SimpleAudioVolume
+                if action == "mute":
+                    vol_ctrl.SetMute(1, None)
+                    last_muted = True
+                elif action == "unmute":
+                    vol_ctrl.SetMute(0, None)
+                    last_muted = False
+                else:
+                    current = float(vol_ctrl.GetMasterVolume())
+                    if action == "set":
+                        target = level_int / 100.0
+                    elif action == "up":
+                        target = current + step
+                    else:
+                        target = current - step
+                    target = max(0.0, min(1.0, target))
+                    # A level change should be audible — lift any mute.
+                    try:
+                        if vol_ctrl.GetMute():
+                            vol_ctrl.SetMute(0, None)
+                            last_muted = False
+                    except Exception:  # noqa: BLE001
+                        pass
+                    vol_ctrl.SetMasterVolume(target, None)
+                    last_level = round(target * 100)
+                matched.append({"pid": int(proc.pid), "process_name": name})
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+    if not matched:
+        return {"error": f"no audio session for '{process_name}'", "affected": 0}
+
+    return {
+        "process_name": process_name,
+        "affected": len(matched),
+        "matched": matched,
+        "action": action,
+        "level": last_level,
+        "muted": last_muted,
+    }
+
+
 def _cmd_system_status(_args: dict) -> dict:
     """CPU %, RAM, primary-disk usage. psutil is the clean path; falls
     back to a PowerShell probe if psutil is not installed."""
@@ -668,6 +835,8 @@ _HANDLERS = {
     "write_file": _cmd_write_file,
     "make_dir": _cmd_make_dir,
     "volume": _cmd_volume,
+    "audio_sessions": _cmd_audio_sessions,
+    "app_volume": _cmd_app_volume,
     "system_status": _cmd_system_status,
     "list_processes": _cmd_list_processes,
     "close_app": _cmd_close_app,

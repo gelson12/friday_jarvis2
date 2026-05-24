@@ -12,6 +12,7 @@ import { useCallback, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import { useGestureControl } from '@/hooks/useGestureControl';
 import { useJarvisUIChannel } from '@/hooks/useJarvisUIChannel';
+import { useJarvisUIStatePublisher } from '@/hooks/useJarvisUIStatePublisher';
 import type { CursorState } from '@/lib/jarvis-ui/gestures';
 import { useJarvisUI } from '@/lib/jarvis-ui/store';
 import { GestureCursor } from './gesture-cursor';
@@ -20,6 +21,7 @@ import { WidgetShell } from './widget-shell';
 
 export function WidgetLayer() {
   useJarvisUIChannel();
+  useJarvisUIStatePublisher();
   const { widgets, highlightId, close, focus, move } = useJarvisUI();
   const [cursor, setCursor] = useState<CursorState | null>(null);
 
