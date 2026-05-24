@@ -17,6 +17,7 @@ import { useUiCommandChannel } from '@/hooks/useUiCommandChannel';
 import type { CursorState } from '@/lib/jarvis-ui/gestures';
 import { useJarvisUI } from '@/lib/jarvis-ui/store';
 import { GestureCursor } from './gesture-cursor';
+import { GestureModeOverlay } from './gesture-mode-overlay';
 import { getWidgetComponent } from './registry';
 import { WidgetShell } from './widget-shell';
 
@@ -58,6 +59,7 @@ export function WidgetLayer() {
           );
         })}
       </AnimatePresence>
+      <GestureModeOverlay />
       <GestureCursor cursor={cursor} />
     </div>
   );

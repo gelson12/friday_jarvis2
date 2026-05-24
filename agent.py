@@ -6,6 +6,7 @@ import uuid
 import base64
 import asyncio
 import logging
+import httpx
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from livekit import agents, rtc, api
@@ -105,6 +106,29 @@ def _camera_intent(text: str):
     return None
 
 
+# Matches the noun-phrase only. Conservative — requires the exact two-word
+# phrase so a stray "gesture" in conversation doesn't toggle the mode.
+_GESTURE_MODE_RE = re.compile(
+    r"\b(gesture\s+mode|hand\s+tracking|gesture\s+control)\b", re.I
+)
+
+
+def _gesture_mode_intent(text: str):
+    """Return True (turn on), False (turn off), or None (not a gesture-mode cmd).
+
+    Reuses _CAM_ON / _CAM_OFF as the polarity vocabulary so the toggle
+    phrasing stays uniform across modes. 'off' wins if both polarities
+    appear.
+    """
+    if not text or not _GESTURE_MODE_RE.search(text):
+        return None
+    if _CAM_OFF.search(text):
+        return False
+    if _CAM_ON.search(text):
+        return True
+    return None
+
+
 # ── Screen widgets (floating HUD panels) ─────────────────────────────
 # The browser renders draggable, semi-transparent widget panels. The
 # worker summons them by publishing a JSON command on the `jarvis-ui`
@@ -158,6 +182,24 @@ _WEBSEARCH_RE = re.compile(
     r"\b(?:search\s+(?:the\s+)?(?:web|internet|google)|google|look\s+up|"
     r"web\s+search|search\s+for)\b", re.I
 )
+# v0.dev website generation. Conservative — must have a build-verb AND
+# a site-noun in the same utterance so "search for site builders" or
+# "build me a sandwich" don't trigger.
+_SITE_BUILD_RE = re.compile(
+    r"\b(?:build|design|create|make|generate|spin\s+up|set\s+up|whip\s+up)\b"
+    r"[^.]*?"
+    r"\b(?:website|web\s*site|site|landing\s+page|webpage|web\s*page|app)\b",
+    re.I,
+)
+# Pulls preview URL out of the v0 assistant message.
+_V0_PREVIEW_URL_RE = re.compile(
+    r"https?://(?:v0\.dev/chat/|[a-z0-9-]+\.vusercontent\.net/?|"
+    r"[a-z0-9-]+\.vercel\.app/?)\S*",
+    re.IGNORECASE,
+)
+V0_API_BASE = os.environ.get("V0_API_BASE", "https://api.v0.dev/v1")
+V0_MODEL = os.environ.get("V0_MODEL", "v0-1.5-md")
+
 # An explicit "put it on screen" verb. The bare nouns `news`/`maps` match
 # far too eagerly ("any news on my project" should be answered, not turned
 # into a news panel), so those two intents additionally require this verb.
@@ -272,6 +314,21 @@ def _content_intent(text: str):
         q = _clean_query(q)
         q = re.sub(r"^(?:of|to|for|the)\s+", "", q, flags=re.I).strip()
         return ("maps", q)
+
+    # v0.dev website generation — BEFORE websearch so "create a site
+    # for cats" doesn't get caught as a web search.
+    if _SITE_BUILD_RE.search(low):
+        q = re.sub(
+            r"\b(?:build|design|create|make|generate|spin\s+up|set\s+up|whip\s+up)\b",
+            " ", t, flags=re.I,
+        )
+        q = re.sub(
+            r"\b(?:website|web\s*site|site|landing\s+page|webpage|web\s*page|app)\b",
+            " ", q, flags=re.I,
+        )
+        q = re.sub(r"\b(?:me|a|an|the|that|which|for|about)\b", " ",
+                   q, flags=re.I)
+        return ("v0", _clean_query(q))
 
     if _WEBSEARCH_RE.search(low):
         return ("web", _clean_query(t))
@@ -1207,6 +1264,40 @@ class Assistant(Agent):
             pass
         return True
 
+    async def _maybe_handle_gesture_mode(self, text: str) -> bool:
+        """Voice-controlled gesture mode. ON also forces camera ON; OFF
+        also forces camera OFF — mirrors OpenJarvis. The fullscreen
+        mirrored camera overlay on the frontend is gated on the
+        gesture_mode flag flipped by this command.
+        """
+        want = _gesture_mode_intent(text)
+        if want is None:
+            return False
+        try:
+            # Camera state piggybacks gesture mode. Send camera FIRST
+            # so the recogniser's track-availability gate flips before
+            # the frontend tries to render the fullscreen preview.
+            await self._room.local_participant.publish_data(
+                json.dumps({"type": "camera", "enabled": want}).encode("utf-8"),
+                reliable=True,
+                topic=UI_COMMAND_TOPIC,
+            )
+            await self._room.local_participant.publish_data(
+                json.dumps({"type": "gesture_mode", "enabled": want}).encode("utf-8"),
+                reliable=True,
+                topic=UI_COMMAND_TOPIC,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ui-command gesture_mode publish failed: %s", exc)
+            return False
+        try:
+            await self.session.say(
+                "Gesture mode on, sir." if want else "Gesture mode off, sir."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     async def _maybe_handle_widget(self, text: str) -> None:
         """Open/close screen widgets when the user asks.
 
@@ -1589,13 +1680,18 @@ class Assistant(Agent):
             "browser": lambda: self.open_browser(
                 arg or "https://www.google.com"
             ),
+            "v0": lambda: self.build_website(arg),
         }
         if kind not in dispatch:
             return False
         try:
-            # Bound the search/browser call so a hung provider can never
-            # freeze the whole voice turn.
-            reply = await asyncio.wait_for(dispatch[kind](), timeout=20.0)
+            # Bound the call so a hung provider can never freeze the
+            # voice turn. v0.dev generations can run 30-60s; everything
+            # else should be much faster.
+            handler_timeout = 120.0 if kind == "v0" else 20.0
+            reply = await asyncio.wait_for(
+                dispatch[kind](), timeout=handler_timeout
+            )
         except asyncio.TimeoutError:
             logger.error("content intent '%s' timed out", kind)
             reply = "That's taking too long, sir — try again in a moment."
@@ -1792,6 +1888,88 @@ class Assistant(Agent):
             f"I found {len(videos)} videos for '{query}' — "
             "the first is ready to play."
         )
+
+    async def build_website(self, prompt: str) -> str:
+        """Generate a website via v0.dev and open it in a `site` widget.
+
+        Two-utterance UX: speak an immediate acknowledgement so the user
+        knows the command landed (v0 generation can take 30-60 s), then
+        return the completion sentence which the caller TTSes.
+        """
+        prompt = (prompt or "").strip() or "a simple landing page"
+        api_key = os.environ.get("V0_API_KEY", "").strip()
+        if not api_key:
+            return "I can't reach v0 — the V0_API_KEY isn't set, sir."
+
+        # Immediate ack so the user knows we heard them. Fire-and-forget;
+        # the spoken return from this method comes ~30-60 s later.
+        try:
+            await self.session.say(
+                "Building your site, sir — one moment."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        payload = {
+            "model": V0_MODEL,
+            "messages": [
+                {"role": "user", "content": f"Build a website: {prompt}"}
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=110.0) as client:
+                resp = await client.post(
+                    f"{V0_API_BASE}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("v0 generation failed: %s", exc)
+            return (
+                "v0 didn't respond just now, sir — try again in a moment."
+            )
+
+        content = ""
+        try:
+            content = (
+                (data.get("choices") or [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                or ""
+            )
+        except Exception:  # noqa: BLE001
+            content = ""
+
+        urls = _V0_PREVIEW_URL_RE.findall(content)
+        # Prefer vusercontent.net (clean preview) over v0.dev/chat (editor).
+        preview_url = next(
+            (u for u in urls if "vusercontent.net" in u),
+            urls[0] if urls else "",
+        )
+        if not preview_url:
+            logger.warning(
+                "v0 returned no preview URL; raw: %r", content[:300]
+            )
+            return (
+                "I built something but couldn't find a preview link, sir."
+            )
+
+        await self._publish_ui(
+            {
+                "type": "open_widget",
+                "kind": "site",
+                "title": f"Site — {prompt[:40]}" if prompt else "Generated Site",
+                "payload": {"url": preview_url, "prompt": prompt},
+            }
+        )
+        return "Your site's on the panel, sir."
 
     async def show_news(self, topic: str = "") -> str:
         """Show current news headlines + a related news video, and speak
@@ -2108,6 +2286,14 @@ class Assistant(Agent):
 
         # ── Screen widgets (open/close panels on request) ────────────
         await self._maybe_handle_widget(text)
+
+        # ── Gesture mode ──────────────────────────────────────────────
+        # Runs BEFORE the bare camera intent so phrasings like "turn on
+        # the camera gesture mode" claim as gesture-mode (which enables
+        # the camera as a side effect). Frontend overlay shows a
+        # mirrored fullscreen camera for hand-gesture UI control.
+        if await self._maybe_handle_gesture_mode(text):
+            raise StopResponse()
 
         # ── Camera on/off ─────────────────────────────────────────────
         # Structured command to the browser via the `ui-command` topic.

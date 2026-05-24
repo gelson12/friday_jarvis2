@@ -11,6 +11,7 @@ import { MapsWidget } from './maps-widget';
 import { NewsWidget } from './news-widget';
 import { PlaceholderWidget } from './placeholder-widget';
 import { SearchWidget } from './search-widget';
+import { SiteWidget } from './site-widget';
 import { YouTubeWidget } from './youtube-widget';
 
 const REGISTRY: Partial<Record<WidgetKind, ComponentType<WidgetComponentProps>>> = {
@@ -21,6 +22,7 @@ const REGISTRY: Partial<Record<WidgetKind, ComponentType<WidgetComponentProps>>>
   youtube: YouTubeWidget,
   maps: MapsWidget,
   browser: BrowserWidget,
+  site: SiteWidget,
 };
 
 export function getWidgetComponent(
