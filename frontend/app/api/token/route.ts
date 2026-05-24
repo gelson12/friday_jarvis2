@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { AccessToken, type AccessTokenOptions, type VideoGrant } from 'livekit-server-sdk';
-import { RoomConfiguration } from '@livekit/protocol';
+import { RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
 
 type ConnectionDetails = {
   serverUrl: string;
@@ -13,6 +13,9 @@ type ConnectionDetails = {
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
+// Name of the Python worker (see agent.py WorkerOptions agent_name=).
+// Default keeps dispatch working when the env var is unset.
+const AGENT_NAME = process.env.AGENT_NAME ?? 'friday';
 
 // don't cache the results
 export const revalidate = 0;
@@ -29,11 +32,31 @@ export async function POST(req: Request) {
       throw new Error('LIVEKIT_API_SECRET is not defined');
     }
 
-    // Parse room config from request body.
-    const body = await req.json();
+    // Parse room config from request body. The client may send an
+    // explicit room_config (sandbox path) or none at all
+    // (TokenSource.endpoint path). Either way, we ensure the room
+    // configuration carries an agent dispatch grant — that's the
+    // only thing that causes LiveKit Cloud to bring our worker into
+    // the user's room. Previously, when the client didn't send a
+    // room_config, the resulting room had no agent dispatch and the
+    // worker would register but never receive a job.
+    type JsonValue = string | number | boolean | null | { [k: string]: JsonValue } | JsonValue[];
+    let body: { room_config?: JsonValue } = {};
+    try {
+      body = await req.json();
+    } catch {
+      // Empty body — fine, we'll build the room_config server-side.
+    }
     const roomConfig = body?.room_config
       ? RoomConfiguration.fromJson(body.room_config, { ignoreUnknownFields: true })
       : new RoomConfiguration();
+
+    // Force-attach the agent dispatch if the client didn't provide one.
+    if (!roomConfig.agents || roomConfig.agents.length === 0) {
+      roomConfig.agents = [
+        new RoomAgentDispatch({ agentName: AGENT_NAME }),
+      ];
+    }
 
     // Generate participant token
     const participantName = 'user';

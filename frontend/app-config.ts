@@ -64,8 +64,13 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   // audioVisualizerWaveLineWidth: 3,
   // audioVisualizerType: 'aura',
 
-  // agent dispatch configuration
-  agentName: process.env.AGENT_NAME ?? undefined,
+  // Agent dispatch configuration.
+  // Default to "friday" so the token's room-config always contains an
+  // agent dispatch grant. The Python worker registers under the same
+  // name (see agent.py WorkerOptions agent_name=...). Without this
+  // default, a missing AGENT_NAME env var means no agent gets
+  // dispatched and the user sticks on the INITIALIZING screen forever.
+  agentName: process.env.AGENT_NAME ?? 'friday',
 
   // LiveKit Cloud Sandbox configuration
   sandboxId: undefined,
