@@ -1,0 +1,49 @@
+name: OpenCTI lifecycle (on-demand)
+
+# Voice-triggered OpenCTI spin-up / spin-down.
+#
+# Fires from the OpenJarvis LiveKit worker via the GitHub
+# workflow_dispatch API when the user says "activate / stand down Global
+# Eyes" (or when a CTI command lands while the platform is offline and
+# the worker auto-spins it up). NO cron — the whole point is to only
+# pay Railway compute while a session is active. A 3-minute idle
+# watchdog in the worker (see Assistant._cti_idle_watch) calls this
+# workflow with action=stop to tear the stack down again.
+#
+# Mirrors the auth + invocation pattern of scheduled-start.yml /
+# scheduled-stop.yml. Reuses the existing railway_schedule.py — the
+# only difference is the --services list targets the OpenCTI stack.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "start = spin up the OpenCTI stack; stop = tear it down"
+        type: choice
+        required: true
+        options:
+          - start
+          - stop
+        default: start
+
+jobs:
+  toggle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet httpx
+
+      - name: ${{ inputs.action }} OpenCTI stack
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          python .github/scripts/railway_schedule.py \
+            --action "${{ inputs.action }}" \
+            --project "divine-contentment" \
+            --services "opencti,opencti-worker,elasticsearch,redis,rabbitmq,minio"
