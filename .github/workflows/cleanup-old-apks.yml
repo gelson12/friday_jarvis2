@@ -1,0 +1,69 @@
+name: Cleanup old mobile-bridge APKs
+
+# Voice-triggered APK builds (see scripts/build-mobile-bridge-apk.sh)
+# create one GitHub release per build. To keep the repo tidy and avoid
+# stockpiling 50+ MB artifacts, this workflow deletes any release
+# tagged `mobile-bridge-*` whose `published_at` is older than 24 h.
+#
+# - Runs hourly via cron so the lag between expiry and deletion is
+#   at most ~1 h.
+# - Also exposed via workflow_dispatch so we can trigger a manual
+#   sweep / test from the Actions tab.
+# - --cleanup-tag deletes the git tag too (otherwise tags accumulate).
+# - Uses the auto-provided GITHUB_TOKEN — no PAT or secret to manage.
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # every hour at :00
+  workflow_dispatch: {}    # manual run button in the Actions tab
+
+permissions:
+  contents: write          # required to delete releases + tags
+
+concurrency:
+  group: cleanup-old-apks  # never overlap two sweeps
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete mobile-bridge releases older than 24h
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 24h cutoff in ISO 8601 (UTC). Releases published BEFORE this
+          # timestamp are eligible for deletion.
+          CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
+          echo "Cutoff: $CUTOFF  (anything published before this gets deleted)"
+
+          # List up to 100 most-recent releases, filter to mobile-bridge-*
+          # tags older than the cutoff. jq does the comparison server-side
+          # so we don't ship every release through bash.
+          OLD_TAGS=$(gh release list --repo "$REPO" --limit 100 \
+              --json tagName,publishedAt \
+              --jq ".[]
+                    | select(.tagName | startswith(\"mobile-bridge-\"))
+                    | select(.publishedAt < \"$CUTOFF\")
+                    | .tagName")
+
+          if [ -z "$OLD_TAGS" ]; then
+            echo "No mobile-bridge-* releases older than 24h. Nothing to do."
+            exit 0
+          fi
+
+          echo "$OLD_TAGS" | while read -r TAG; do
+            [ -n "$TAG" ] || continue
+            echo ">> deleting $TAG (release + git tag)"
+            # --cleanup-tag drops the underlying git tag; --yes skips the
+            # interactive confirmation prompt.
+            gh release delete "$TAG" \
+              --repo "$REPO" \
+              --cleanup-tag \
+              --yes
+          done
+
+          echo "Sweep complete."
