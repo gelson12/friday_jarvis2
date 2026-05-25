@@ -6,7 +6,6 @@ import io.livekit.android.LiveKit
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
-import io.livekit.android.room.participant.DataPublishReliability
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -98,7 +97,7 @@ class LiveKitClient(
                     .put("result", result)
                 r.localParticipant.publishData(
                     reply.toString().toByteArray(Charsets.UTF_8),
-                    reliability = DataPublishReliability.RELIABLE,
+                    reliable = true,
                     topic = TOPIC_RESULT,
                 )
             } catch (e: Exception) {
