@@ -1,9 +1,11 @@
-name: Cleanup old mobile-bridge APKs
+name: Cleanup old voice-built APKs
 
 # Voice-triggered APK builds (see scripts/build-mobile-bridge-apk.sh)
 # create one GitHub release per build. To keep the repo tidy and avoid
-# stockpiling 50+ MB artifacts, this workflow deletes any release
-# tagged `mobile-bridge-*` whose `published_at` is older than 24 h.
+# stockpiling 50+ MB artifacts, this workflow deletes any release whose
+# tag matches the voice-build prefixes (mobile-bridge-* for the
+# dedicated builder, voice-apk-* for arbitrary-repo builds) and whose
+# `published_at` is older than 24 h.
 #
 # - Runs hourly via cron so the lag between expiry and deletion is
 #   at most ~1 h.
@@ -28,7 +30,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete mobile-bridge releases older than 24h
+      - name: Delete voice-built releases older than 24h
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -40,18 +42,19 @@ jobs:
           CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
           echo "Cutoff: $CUTOFF  (anything published before this gets deleted)"
 
-          # List up to 100 most-recent releases, filter to mobile-bridge-*
-          # tags older than the cutoff. jq does the comparison server-side
-          # so we don't ship every release through bash.
+          # List up to 100 most-recent releases, filter to tags from
+          # either voice-build pipeline that are older than the cutoff.
+          # jq does the comparison server-side so we don't ship every
+          # release through bash.
           OLD_TAGS=$(gh release list --repo "$REPO" --limit 100 \
               --json tagName,publishedAt \
               --jq ".[]
-                    | select(.tagName | startswith(\"mobile-bridge-\"))
+                    | select(.tagName | startswith(\"mobile-bridge-\") or startswith(\"voice-apk-\"))
                     | select(.publishedAt < \"$CUTOFF\")
                     | .tagName")
 
           if [ -z "$OLD_TAGS" ]; then
-            echo "No mobile-bridge-* releases older than 24h. Nothing to do."
+            echo "No voice-built releases older than 24h. Nothing to do."
             exit 0
           fi
 
