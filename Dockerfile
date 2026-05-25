@@ -80,6 +80,10 @@ RUN python -c "from livekit.plugins import silero; silero.VAD.load()" 2>/dev/nul
 # Worker code (explicit list — no COPY . . sprawl)
 COPY agent.py prompts.py hermes_adapter.py search_tools.py browser_view.py ./
 COPY thirdparty/ ./thirdparty/
+# Accommodation booking module — vendored in-repo (see brain/Accommodation
+# Booking — Implementation Plan in the Obsidian vault). Lazy-imported by
+# the worker, so a missing folder degrades gracefully.
+COPY accommodation/ ./accommodation/
 
 # Next.js standalone artifacts. Standalone is a minimised tree; static
 # assets and public/ must be copied as siblings at their canonical paths.

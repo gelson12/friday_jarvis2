@@ -4,6 +4,7 @@
 
 import { type ComponentType } from 'react';
 import type { WidgetComponentProps, WidgetKind } from '@/lib/jarvis-ui/protocol';
+import { AccommodationWidget } from './accommodation-widget';
 import { BrowserWidget } from './browser-widget';
 import { ChatWidget } from './chat-widget';
 import { ClockWidget } from './clock-widget';
@@ -25,6 +26,7 @@ const REGISTRY: Partial<Record<WidgetKind, ComponentType<WidgetComponentProps>>>
   browser: BrowserWidget,
   site: SiteWidget,
   cti: CTIWidget,
+  accommodation: AccommodationWidget,
 };
 
 export function getWidgetComponent(

@@ -31,7 +31,8 @@ export type WidgetKind =
   | 'apps'
   | 'system'
   | 'site'
-  | 'cti';
+  | 'cti'
+  | 'accommodation';
 
 /** A live widget panel rendered on screen. */
 export interface WidgetInstance {
@@ -115,6 +116,36 @@ export interface CTIPayload {
   dashboard?: string;
 }
 
+/** A single accommodation listing — item in the `accommodation` widget
+ * payload. Mirrors the normalized `Property` dataclass from the
+ * accommodation Python module. */
+export interface AccommodationProperty {
+  provider_id: string;
+  external_id: string;
+  name: string;
+  price_total: number;
+  price_currency: string;
+  rating: number | null;
+  review_count: number | null;
+  address: string;
+  images: string[];
+  lat: number;
+  lng: number;
+}
+
+/** `accommodation` widget payload — either a search-results carousel OR a
+ * post-booking checkout-link card (when `checkout_url` is set and the
+ * Telegram handoff fell back to HUD delivery). */
+export interface AccommodationPayload {
+  query: string;
+  check_in?: string;        // ISO date when this is a search-results panel
+  check_out?: string;
+  properties?: AccommodationProperty[];
+  checkout_url?: string;    // set only on Telegram-fallback payment-link card
+  price_total?: number;
+  price_currency?: string;
+}
+
 /** Commands the worker sends to the browser on {@link JARVIS_UI_TOPIC}. */
 export type JarvisUIMessage =
   | { type: 'open_widget'; kind: WidgetKind; title?: string; payload?: unknown; id?: string }
@@ -154,6 +185,7 @@ export const WIDGET_KINDS: WidgetKind[] = [
   'system',
   'site',
   'cti',
+  'accommodation',
 ];
 
 /** Default panel size per widget kind, in CSS pixels. */
@@ -170,6 +202,7 @@ export const WIDGET_DEFAULT_SIZE: Record<WidgetKind, { w: number; h: number }> =
   system: { w: 340, h: 260 },
   site: { w: 900, h: 640 },
   cti: { w: 900, h: 640 },
+  accommodation: { w: 880, h: 580 },
 };
 
 /** Default header text per widget kind. */
@@ -186,4 +219,5 @@ export const WIDGET_DEFAULT_TITLE: Record<WidgetKind, string> = {
   system: 'System Status',
   site: 'Generated Site',
   cti: 'Intelligence',
+  accommodation: 'Stays',
 };

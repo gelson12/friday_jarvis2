@@ -25,6 +25,27 @@ from openai import AsyncOpenAI
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 import search_tools
 
+# Accommodation booking. Lazy-import so a missing module never crashes
+# worker startup. See `brain/Accommodation Booking — Implementation Plan` in
+# the user's Obsidian vault for the full design.
+try:
+    from accommodation import (  # noqa: F401
+        AccommodationService,
+        Property as _AccommodationProperty,
+        SearchQuery as _AccommodationSearchQuery,
+        BookingRequest as _AccommodationBookingRequest,
+    )
+    _ACCOMMODATION_AVAILABLE = True
+except Exception as _exc:  # noqa: BLE001
+    AccommodationService = None  # type: ignore[assignment]
+    _AccommodationProperty = None  # type: ignore[assignment]
+    _AccommodationSearchQuery = None  # type: ignore[assignment]
+    _AccommodationBookingRequest = None  # type: ignore[assignment]
+    _ACCOMMODATION_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "accommodation module unavailable (%s) — hotel booking disabled", _exc,
+    )
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -183,6 +204,24 @@ _WEBSEARCH_RE = re.compile(
     r"\b(?:search\s+(?:the\s+)?(?:web|internet|google)|google|look\s+up|"
     r"web\s+search|search\s+for)\b", re.I
 )
+# Accommodation booking intent. Catches "find me a hotel", "book a place",
+# "Airbnb in Lisbon", etc. See `brain/Accommodation Booking — Feasibility &
+# Architecture` in the user's vault.
+_ACCOMMODATION_RE = re.compile(
+    r"\b(hotel|airbnb|accommodation|vacation\s+rental|short\s+let|"
+    r"book\s+(?:a\s+|me\s+)?(?:room|place|hotel|stay)|where\s+to\s+stay|"
+    r"find\s+(?:me\s+)?(?:a\s+|an\s+)?(?:hotel|place|stay|room))\b", re.I
+)
+_ACCOMMODATION_BOOK_RE = re.compile(
+    r"\b(?:book|reserve|confirm)\s+(?:the\s+|that\s+|it\b)", re.I
+)
+_ACCOMMODATION_LOC_RE = re.compile(
+    r"\b(?:in|at|near|around)\s+"
+    r"([a-z][\w' .-]+?)"
+    r"(?=\s+(?:for|on|next|this|tomorrow|tonight|over|with|from|between)|"
+    r"[.,?!]|$)", re.I
+)
+
 # v0.dev website generation. Conservative — must have a build-verb AND
 # a site-noun in the same utterance so "search for site builders" or
 # "build me a sandwich" don't trigger.
@@ -2111,6 +2150,11 @@ class Assistant(Agent):
         if _hurl:
             self._feedback_url = f"{_hurl}/v1/feedback"
         self._hermes_key: str = (os.environ.get("HERMES_API_KEY") or "").strip()
+        # Accommodation booking. Lazy-init: build once on first use so a
+        # missing LITEAPI_KEY doesn't crash worker startup.
+        self._accommodation = None  # type: ignore[assignment]
+        self._accommodation_init_attempted = False
+        self._accommodation_last_results: list = []
         self._wire_video(room)
 
     def _has_widget(self, kind: str) -> bool:
@@ -3244,6 +3288,261 @@ class Assistant(Agent):
             pass
         return True
 
+    # ── Accommodation booking ────────────────────────────────────────
+    def _accommodation_service(self):
+        """Lazy-init the accommodation service. Returns None when no provider
+        env vars are configured — caller speaks a graceful "not configured"
+        reply."""
+        if self._accommodation is not None:
+            return self._accommodation
+        if self._accommodation_init_attempted or not _ACCOMMODATION_AVAILABLE:
+            return None
+        self._accommodation_init_attempted = True
+        try:
+            self._accommodation = AccommodationService.from_env()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("accommodation init failed: %s", exc)
+            self._accommodation = None
+        return self._accommodation
+
+    def _parse_accommodation_dates(self, text: str) -> tuple:
+        """Phase 1 date NLU: default to a 2-night stay starting next Friday
+        for 'weekend', tomorrow → day-after for 'tomorrow', etc. Richer date
+        parsing (specific dates, ranges) is a Phase 2 add-on."""
+        from datetime import date as _date, timedelta as _td
+        today = _date.today()
+        if re.search(r"\bweekend\b", text, re.I):
+            days_to_fri = (4 - today.weekday()) % 7 or 7
+            check_in = today + _td(days=days_to_fri)
+            check_out = check_in + _td(days=2)
+        elif re.search(r"\btonight\b", text, re.I):
+            check_in = today
+            check_out = today + _td(days=1)
+        elif re.search(r"\btomorrow\b", text, re.I):
+            check_in = today + _td(days=1)
+            check_out = today + _td(days=2)
+        else:
+            check_in = today + _td(days=7)
+            check_out = check_in + _td(days=2)
+        return check_in, check_out
+
+    def _parse_accommodation_location(self, text: str) -> str:
+        m = _ACCOMMODATION_LOC_RE.search(text)
+        if m:
+            return m.group(1).strip().rstrip(".,?!").title()
+        return ""
+
+    async def _handle_accommodation_search(self, text: str) -> bool:
+        service = self._accommodation_service()
+        if service is None:
+            try:
+                await self.session.say("Accommodation isn't configured, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        location = self._parse_accommodation_location(text)
+        if not location:
+            try:
+                await self.session.say(
+                    "Where would you like to stay, sir? Tell me a city or area."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        check_in, check_out = self._parse_accommodation_dates(text)
+        query = _AccommodationSearchQuery(
+            location=location,
+            check_in=check_in,
+            check_out=check_out,
+            guests=2,
+            currency=os.environ.get("ACCOMMODATION_DEFAULT_CURRENCY", "GBP"),
+        )
+        try:
+            properties = await asyncio.wait_for(service.search(query, limit=12), timeout=20.0)
+        except asyncio.TimeoutError:
+            try:
+                await self.session.say("The search took too long, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("accommodation search failed: %s", exc)
+            try:
+                await self.session.say("I couldn't reach the booking system just now, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        self._accommodation_last_results = properties
+        await self._publish_ui({
+            "type": "open_widget",
+            "kind": "accommodation",
+            "title": f"Stays in {location}",
+            "payload": {
+                "query": location,
+                "check_in": check_in.isoformat(),
+                "check_out": check_out.isoformat(),
+                "properties": [
+                    {
+                        "provider_id": p.provider_id,
+                        "external_id": p.external_id,
+                        "name": p.name,
+                        "price_total": p.price_total,
+                        "price_currency": p.price_currency,
+                        "rating": p.rating,
+                        "review_count": p.review_count,
+                        "address": p.address,
+                        "images": p.images[:3],
+                        "lat": p.lat,
+                        "lng": p.lng,
+                    }
+                    for p in properties
+                ],
+            },
+        })
+        if not properties:
+            try:
+                await self.session.say(
+                    f"I couldn't find any properties in {location} for those dates, sir."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        cheapest = properties[0]
+        nights = (check_out - check_in).days
+        try:
+            await self.session.say(
+                f"Found {len(properties)} properties in {location}, sir. "
+                f"The {cheapest.name} is cheapest at {cheapest.price_total:.0f} "
+                f"{cheapest.price_currency} total for {nights} nights. "
+                f"Say 'book the {cheapest.name.split()[0]}' to reserve."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _handle_accommodation_book(self, text: str) -> bool:
+        service = self._accommodation_service()
+        if service is None or not self._accommodation_last_results:
+            try:
+                await self.session.say(
+                    "I don't have any properties to book, sir — search first."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        text_lower = text.lower()
+        target = None
+        for prop in self._accommodation_last_results:
+            for tok in prop.name.lower().split():
+                if len(tok) > 3 and tok in text_lower:
+                    target = prop
+                    break
+            if target is not None:
+                break
+        if target is None:
+            target = self._accommodation_last_results[0]
+        first_name = os.environ.get("ACCOMMODATION_GUEST_FIRST_NAME", "").strip()
+        last_name = os.environ.get("ACCOMMODATION_GUEST_LAST_NAME", "").strip()
+        email = os.environ.get("ACCOMMODATION_GUEST_EMAIL", "").strip()
+        if not (first_name and last_name and email):
+            try:
+                await self.session.say(
+                    "Booking isn't fully set up, sir — guest details missing on the worker."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        try:
+            quote = await asyncio.wait_for(service.quote(target), timeout=15.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("accommodation quote failed: %s", exc)
+            try:
+                await self.session.say("I couldn't lock in the price just now, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        request = _AccommodationBookingRequest(
+            quote_id=quote.quote_id,
+            book_token=quote.book_token,
+            guest_first_name=first_name,
+            guest_last_name=last_name,
+            guest_email=email,
+        )
+        try:
+            result = await asyncio.wait_for(
+                service.book(
+                    request,
+                    property_name=target.name,
+                    provider_id=target.provider_id,
+                ),
+                timeout=25.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("accommodation book failed: %s", exc)
+            try:
+                await self.session.say("The booking failed, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        if not result.success or not result.checkout_url:
+            try:
+                await self.session.say(
+                    "The provider didn't return a payment link, sir."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        if not service.telegram.configured:
+            await self._publish_ui({
+                "type": "open_widget",
+                "kind": "accommodation",
+                "title": "Complete payment",
+                "payload": {
+                    "query": target.name,
+                    "checkout_url": result.checkout_url,
+                    "price_total": result.price_total,
+                    "price_currency": result.price_currency,
+                },
+            })
+        try:
+            await self.session.say(
+                f"Booking link sent to your phone, sir. "
+                f"Total {result.price_total:.0f} {result.price_currency}. "
+                f"Tap to complete payment securely."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _maybe_handle_accommodation(self, text: str) -> bool:
+        if not _ACCOMMODATION_RE.search(text or ""):
+            return False
+        if _ACCOMMODATION_BOOK_RE.search(text) and self._accommodation_last_results:
+            return await self._handle_accommodation_book(text)
+        return await self._handle_accommodation_search(text)
+
+    async def _vault_write_note(self, rel_path: str, content: str) -> bool:
+        """POST a note to the obsidian-mind Railway service. fj2 runs on
+        Railway so a local FS write isn't an option; the cloud service has
+        the vault mounted. Returns True on success."""
+        url = os.environ.get("OBSIDIAN_MIND_URL", "").strip().rstrip("/")
+        if not url:
+            return False
+        token = os.environ.get("OBSIDIAN_MIND_TOKEN", "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{url}/api/notes/{rel_path}",
+                    json={"content": content},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vault write failed for %s: %s", rel_path, exc)
+            return False
+
     async def _maybe_handle_telegram(self, text: str) -> bool:
         """Send a Telegram message via the official Bot API.
 
@@ -4080,6 +4379,14 @@ class Assistant(Agent):
         # so detect the intent here and run the real flow. We speak our
         # own confirmation, so stop the turn before it reaches the LLM.
         if await self._maybe_handle_content(text):
+            raise StopResponse()
+
+        # ── Accommodation booking (LiteAPI Phase 1) ──────────────────
+        # Search/book hotels by voice. PCI-safe by design — card data never
+        # touches the worker; payment is handed off to the user's phone via
+        # a Telegram magic link. See brain/Accommodation Booking — PCI &
+        # Payment Handoff in the vault.
+        if await self._maybe_handle_accommodation(text):
             raise StopResponse()
 
         # ── Intelligence — OpenCTI graph operations (Global Eyes) ─────
