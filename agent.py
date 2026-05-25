@@ -35,12 +35,14 @@ try:
         SearchQuery as _AccommodationSearchQuery,
         BookingRequest as _AccommodationBookingRequest,
     )
+    from accommodation import nlu as _accommodation_nlu
     _ACCOMMODATION_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001
     AccommodationService = None  # type: ignore[assignment]
     _AccommodationProperty = None  # type: ignore[assignment]
     _AccommodationSearchQuery = None  # type: ignore[assignment]
     _AccommodationBookingRequest = None  # type: ignore[assignment]
+    _accommodation_nlu = None  # type: ignore[assignment]
     _ACCOMMODATION_AVAILABLE = False
     logging.getLogger(__name__).warning(
         "accommodation module unavailable (%s) — hotel booking disabled", _exc,
@@ -213,14 +215,17 @@ _ACCOMMODATION_RE = re.compile(
     r"find\s+(?:me\s+)?(?:a\s+|an\s+)?(?:hotel|place|stay|room))\b", re.I
 )
 _ACCOMMODATION_BOOK_RE = re.compile(
-    r"\b(?:book|reserve|confirm)\s+(?:the\s+|that\s+|it\b)", re.I
+    r"\b(?:book|reserve)\s+(?:the\s+|that\s+|it\b)", re.I
 )
-_ACCOMMODATION_LOC_RE = re.compile(
-    r"\b(?:in|at|near|around)\s+"
-    r"([a-z][\w' .-]+?)"
-    r"(?=\s+(?:for|on|next|this|tomorrow|tonight|over|with|from|between)|"
-    r"[.,?!]|$)", re.I
+_ACCOMMODATION_YES_RE = re.compile(
+    r"\b(?:yes|yeah|yep|sure|ok|okay|go\s+ahead|do\s+it|"
+    r"book\s+it|confirm|please\s+do|sounds\s+good)\b", re.I
 )
+_ACCOMMODATION_NO_RE = re.compile(
+    r"\b(?:no|nope|nah|cancel|never\s*mind|don'?t|stop|"
+    r"actually\s+no|hold\s+on)\b", re.I
+)
+_ACCOMMODATION_PENDING_TTL_S = 90.0
 
 # v0.dev website generation. Conservative — must have a build-verb AND
 # a site-noun in the same utterance so "search for site builders" or
@@ -2151,10 +2156,12 @@ class Assistant(Agent):
             self._feedback_url = f"{_hurl}/v1/feedback"
         self._hermes_key: str = (os.environ.get("HERMES_API_KEY") or "").strip()
         # Accommodation booking. Lazy-init: build once on first use so a
-        # missing LITEAPI_KEY doesn't crash worker startup.
+        # missing LITEAPI_KEY doesn't crash worker startup. Pending book holds
+        # a locked-in quote between "book the Marriott" and the user's "yes".
         self._accommodation = None  # type: ignore[assignment]
         self._accommodation_init_attempted = False
         self._accommodation_last_results: list = []
+        self._accommodation_pending_book: dict | None = None
         self._wire_video(room)
 
     def _has_widget(self, kind: str) -> bool:
@@ -3305,33 +3312,6 @@ class Assistant(Agent):
             self._accommodation = None
         return self._accommodation
 
-    def _parse_accommodation_dates(self, text: str) -> tuple:
-        """Phase 1 date NLU: default to a 2-night stay starting next Friday
-        for 'weekend', tomorrow → day-after for 'tomorrow', etc. Richer date
-        parsing (specific dates, ranges) is a Phase 2 add-on."""
-        from datetime import date as _date, timedelta as _td
-        today = _date.today()
-        if re.search(r"\bweekend\b", text, re.I):
-            days_to_fri = (4 - today.weekday()) % 7 or 7
-            check_in = today + _td(days=days_to_fri)
-            check_out = check_in + _td(days=2)
-        elif re.search(r"\btonight\b", text, re.I):
-            check_in = today
-            check_out = today + _td(days=1)
-        elif re.search(r"\btomorrow\b", text, re.I):
-            check_in = today + _td(days=1)
-            check_out = today + _td(days=2)
-        else:
-            check_in = today + _td(days=7)
-            check_out = check_in + _td(days=2)
-        return check_in, check_out
-
-    def _parse_accommodation_location(self, text: str) -> str:
-        m = _ACCOMMODATION_LOC_RE.search(text)
-        if m:
-            return m.group(1).strip().rstrip(".,?!").title()
-        return ""
-
     async def _handle_accommodation_search(self, text: str) -> bool:
         service = self._accommodation_service()
         if service is None:
@@ -3340,7 +3320,7 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
-        location = self._parse_accommodation_location(text)
+        location = _accommodation_nlu.parse_location(text)
         if not location:
             try:
                 await self.session.say(
@@ -3349,13 +3329,16 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
-        check_in, check_out = self._parse_accommodation_dates(text)
+        check_in, check_out = _accommodation_nlu.parse_dates(text)
+        guests = _accommodation_nlu.parse_guests(text)
+        preferred = _accommodation_nlu.parse_provider_preference(text)
         query = _AccommodationSearchQuery(
             location=location,
             check_in=check_in,
             check_out=check_out,
-            guests=2,
+            guests=guests,
             currency=os.environ.get("ACCOMMODATION_DEFAULT_CURRENCY", "GBP"),
+            preferred_providers=preferred,
         )
         try:
             properties = await asyncio.wait_for(service.search(query, limit=12), timeout=20.0)
@@ -3420,7 +3403,10 @@ class Assistant(Agent):
             pass
         return True
 
-    async def _handle_accommodation_book(self, text: str) -> bool:
+    async def _handle_accommodation_book_start(self, text: str) -> bool:
+        """Phase 2: locks in a quote and asks the user to confirm. The actual
+        booking only fires once the user replies "yes" — handled in
+        `_maybe_resume_accommodation_book` on the next turn."""
         service = self._accommodation_service()
         if service is None or not self._accommodation_last_results:
             try:
@@ -3430,15 +3416,16 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
+        # Best-overlap property-name match.
         text_lower = text.lower()
         target = None
+        best_overlap = 0
         for prop in self._accommodation_last_results:
-            for tok in prop.name.lower().split():
-                if len(tok) > 3 and tok in text_lower:
-                    target = prop
-                    break
-            if target is not None:
-                break
+            tokens = [t for t in prop.name.lower().split() if len(t) > 3]
+            overlap = sum(1 for tok in tokens if tok in text_lower)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                target = prop
         if target is None:
             target = self._accommodation_last_results[0]
         first_name = os.environ.get("ACCOMMODATION_GUEST_FIRST_NAME", "").strip()
@@ -3447,7 +3434,23 @@ class Assistant(Agent):
         if not (first_name and last_name and email):
             try:
                 await self.session.say(
-                    "Booking isn't fully set up, sir — guest details missing on the worker."
+                    "Booking isn't fully set up, sir — guest details missing."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        is_redirect = target.extras.get("is_redirect_provider", False) if hasattr(target, "extras") else False
+        if is_redirect:
+            self._accommodation_pending_book = {
+                "target": target,
+                "quote": None,
+                "is_redirect": True,
+                "created_at": time.time(),
+            }
+            try:
+                await self.session.say(
+                    f"That's an Airbnb listing — I can open it on your phone so you "
+                    f"finish the booking on Airbnb itself. Shall I send the link, sir?"
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -3461,12 +3464,40 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
+        self._accommodation_pending_book = {
+            "target": target,
+            "quote": quote,
+            "is_redirect": False,
+            "created_at": time.time(),
+        }
+        try:
+            await self.session.say(
+                f"Locked in {quote.price_total:.0f} {quote.price_currency} total at "
+                f"the {target.name}. {quote.cancellation_policy[:120]} "
+                f"Confirm, sir?"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def _finalize_pending_book(self) -> bool:
+        pending = self._accommodation_pending_book
+        if not pending:
+            return False
+        self._accommodation_pending_book = None
+        service = self._accommodation_service()
+        if service is None:
+            return True
+        target = pending["target"]
+        is_redirect = pending.get("is_redirect", False)
+        quote = pending.get("quote")
+        book_token = (quote.book_token if quote else target.book_token)
         request = _AccommodationBookingRequest(
-            quote_id=quote.quote_id,
-            book_token=quote.book_token,
-            guest_first_name=first_name,
-            guest_last_name=last_name,
-            guest_email=email,
+            quote_id=(quote.quote_id if quote else target.book_token),
+            book_token=book_token,
+            guest_first_name=os.environ.get("ACCOMMODATION_GUEST_FIRST_NAME", "").strip(),
+            guest_last_name=os.environ.get("ACCOMMODATION_GUEST_LAST_NAME", "").strip(),
+            guest_email=os.environ.get("ACCOMMODATION_GUEST_EMAIL", "").strip(),
         )
         try:
             result = await asyncio.wait_for(
@@ -3496,7 +3527,7 @@ class Assistant(Agent):
             await self._publish_ui({
                 "type": "open_widget",
                 "kind": "accommodation",
-                "title": "Complete payment",
+                "title": "Complete on Airbnb" if is_redirect else "Complete payment",
                 "payload": {
                     "query": target.name,
                     "checkout_url": result.checkout_url,
@@ -3505,20 +3536,44 @@ class Assistant(Agent):
                 },
             })
         try:
-            await self.session.say(
-                f"Booking link sent to your phone, sir. "
-                f"Total {result.price_total:.0f} {result.price_currency}. "
-                f"Tap to complete payment securely."
-            )
+            if is_redirect:
+                await self.session.say(
+                    f"Sent the Airbnb listing to your phone, sir. "
+                    f"Tap it to complete the booking on Airbnb."
+                )
+            else:
+                await self.session.say(
+                    f"Booking link sent to your phone, sir. "
+                    f"Total {result.price_total:.0f} {result.price_currency}. "
+                    f"Tap to complete payment securely."
+                )
         except Exception:  # noqa: BLE001
             pass
         return True
+
+    async def _maybe_resume_accommodation_book(self, text: str) -> bool:
+        pending = self._accommodation_pending_book
+        if not pending:
+            return False
+        if time.time() - pending["created_at"] > _ACCOMMODATION_PENDING_TTL_S:
+            self._accommodation_pending_book = None
+            return False
+        if _ACCOMMODATION_NO_RE.search(text or ""):
+            self._accommodation_pending_book = None
+            try:
+                await self.session.say("Cancelled, sir.")
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        if _ACCOMMODATION_YES_RE.search(text or ""):
+            return await self._finalize_pending_book()
+        return False
 
     async def _maybe_handle_accommodation(self, text: str) -> bool:
         if not _ACCOMMODATION_RE.search(text or ""):
             return False
         if _ACCOMMODATION_BOOK_RE.search(text) and self._accommodation_last_results:
-            return await self._handle_accommodation_book(text)
+            return await self._handle_accommodation_book_start(text)
         return await self._handle_accommodation_search(text)
 
     async def _vault_write_note(self, rel_path: str, content: str) -> bool:
@@ -4374,6 +4429,12 @@ class Assistant(Agent):
         if await self._maybe_handle_close_widget(text):
             raise StopResponse()
 
+        # ── Accommodation booking — confirm resume (yes/no) ──────────
+        # Runs BEFORE content so a bare "yes" after "confirm the Marriott?"
+        # doesn't get swallowed by a search/show handler.
+        if await self._maybe_resume_accommodation_book(text):
+            raise StopResponse()
+
         # ── Screen content — search / video / news / maps / browser ──
         # Regex fallback: the voice LLM does not reliably emit tool calls,
         # so detect the intent here and run the real flow. We speak our
@@ -4381,10 +4442,9 @@ class Assistant(Agent):
         if await self._maybe_handle_content(text):
             raise StopResponse()
 
-        # ── Accommodation booking (LiteAPI Phase 1) ──────────────────
-        # Search/book hotels by voice. PCI-safe by design — card data never
-        # touches the worker; payment is handed off to the user's phone via
-        # a Telegram magic link. See brain/Accommodation Booking — PCI &
+        # ── Accommodation booking (LiteAPI Phase 1 + Apify Airbnb Phase 2) ──
+        # Search/book hotels and Airbnb by voice. PCI-safe — card data never
+        # touches the worker. See brain/Accommodation Booking — PCI &
         # Payment Handoff in the vault.
         if await self._maybe_handle_accommodation(text):
             raise StopResponse()
