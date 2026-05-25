@@ -1,0 +1,130 @@
+{
+  "name": "Hermes Routing Maturity Tracker",
+  "description": "Phase 4 of the vault self-improvement loop. Cloned from the crypto outcome_tracker pattern (Laplace-smoothed Bayesian update kept verbatim). Reads vault qa entries, computes per-(domain, model) success rate from feedback signals, pushes mature (domain, model) pairs into Hermes's in-process maturity table via PUT /v1/routing/maturity. Also writes a routing_maturity summary back to the vault for the next cron pass to compare against.",
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "rm01",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {"field": "hours", "hoursInterval": 6}
+          ]
+        }
+      }
+    },
+    {
+      "id": "rm02",
+      "name": "Read Vault QA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [200, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://super-agent-production.up.railway.app/memory/export",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "limit", "value": "200"},
+            {"name": "tag", "value": "qa"}
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-Vault-Secret", "value": "2dc6c69574c14d615ce146e54640aa13030dade7aa86697c"}
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "rm03",
+      "name": "Compute Maturity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 300],
+      "parameters": {
+        "jsCode": "// Phase 4 — Routing Maturity Tracker\n// Groups vault qa entries by (domain, model), computes Laplace-smoothed success\n// rate from success_flag metadata posted by /v1/feedback (Phase 3), and emits\n// `mature=true` for (domain, model) pairs with >=30 samples and smoothed\n// success >= 0.85.  Math intentionally identical to the crypto outcome_tracker\n// Bayesian update (ML-03) — same trust profile, same persistence.\n\nfunction _node(name) {\n  try { return $(name).first().json || {}; } catch (e) { return {}; }\n}\n\nconst vaultRaw = _node('Read Vault QA');\nconst memories = (vaultRaw && vaultRaw.memories) ? vaultRaw.memories : [];\n\n// (domain, model) -> { accepted, corrected, total, samples_by_model }\nconst groups = {};\nfor (const mem of memories) {\n  const content = mem.content || '';\n  const meta = (mem.metadata && typeof mem.metadata === 'object') ? mem.metadata : {};\n\n  // Domain — from metadata first, fallback to the 'Q (... | <domain>):' header\n  // the VaultProvider writes.\n  let domain = (meta.domain || '').toString().trim().toLowerCase();\n  if (!domain) {\n    const m = content.match(/Q \\([^|]+\\|\\s*([a-z0-9_-]+)\\)/i);\n    if (m) domain = m[1].toLowerCase();\n  }\n  if (!domain) domain = 'general';\n\n  // Model — present when the routing decision logged it; otherwise lump under '_default'.\n  const model = (meta.routed_model || meta.model || '_default').toString();\n  const key = domain + '||' + model;\n\n  if (!groups[key]) {\n    groups[key] = { domain, model, accepted: 0, corrected: 0, total: 0 };\n  }\n  groups[key].total += 1;\n\n  const flag = (meta.success_flag || '').toString().toLowerCase();\n  if (flag === 'accepted') groups[key].accepted += 1;\n  else if (flag === 'corrected') groups[key].corrected += 1;\n}\n\n// ML-03 Bayesian update — Laplace smoothing, alpha=1.\nconst ALPHA = 1;\nconst updates = [];\nlet matureCount = 0;\nlet evaluated = 0;\nfor (const key in groups) {\n  const g = groups[key];\n  const evaluatedHere = g.accepted + g.corrected;\n  if (evaluatedHere === 0) continue;\n  evaluated += evaluatedHere;\n  const rate = (g.accepted + ALPHA) / (evaluatedHere + 2 * ALPHA);\n  // Mature threshold matches the plan: >=30 evaluated samples AND smoothed >=0.85.\n  const mature = evaluatedHere >= 30 && rate >= 0.85;\n  if (mature) matureCount += 1;\n  updates.push({\n    domain: g.domain,\n    model: g.model === '_default' ? '' : g.model,\n    samples: evaluatedHere,\n    success_rate: Math.round(rate * 10000) / 10000,\n    mature: mature\n  });\n}\n\n// Persist a per-day history snapshot for trend analysis (matches the IC history\n// pattern in the crypto outcome_tracker so existing dashboards can render this).\nconst historyKey = 'maturity_' + new Date().toISOString().slice(0, 10);\nconst history = ($getWorkflowStaticData('maturity_history') || {});\nif (!history[historyKey]) history[historyKey] = [];\nhistory[historyKey].push({ ts: new Date().toISOString(), matureCount, evaluated, groupCount: updates.length });\nif (history[historyKey].length > 20) {\n  history[historyKey] = history[historyKey].slice(-20);\n}\n$setWorkflowStaticData('maturity_history', history);\n\nconst summary = 'ROUTING MATURITY | ' + new Date().toISOString().slice(0, 16) + 'Z\\n' +\n  'Groups evaluated: ' + updates.length + '\\n' +\n  'Total feedback samples: ' + evaluated + '\\n' +\n  'Mature (cheap-routed) pairs: ' + matureCount + '\\n' +\n  updates.slice(0, 8).map(u => '- ' + u.domain + ' / ' + (u.model || 'default') + ' : ' + u.samples + ' samples @ ' + Math.round(u.success_rate * 100) + '%' + (u.mature ? ' [MATURE]' : '')).join('\\n');\n\nreturn [{ json: { updates, matureCount, evaluated, summary } }];\n"
+      }
+    },
+    {
+      "id": "rm04",
+      "name": "Push Maturity To Hermes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 200],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $env.HERMES_URL || 'http://hermes-agent:8080' }}/v1/routing/maturity",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ updates: $json.updates }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "=Bearer {{ $env.HERMES_API_KEY }}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "rm05",
+      "name": "Write Maturity To Vault",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 400],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://super-agent-production.up.railway.app/memory/ingest",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "content", "value": "={{ $json.summary }}"},
+            {"name": "tags", "value": "[\"routing_maturity\",\"hermes\"]"},
+            {"name": "source", "value": "routing_maturity_tracker"}
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-Vault-Secret", "value": "2dc6c69574c14d615ce146e54640aa13030dade7aa86697c"}
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{"node": "Read Vault QA", "type": "main", "index": 0}]]
+    },
+    "Read Vault QA": {
+      "main": [[{"node": "Compute Maturity", "type": "main", "index": 0}]]
+    },
+    "Compute Maturity": {
+      "main": [[
+        {"node": "Push Maturity To Hermes", "type": "main", "index": 0},
+        {"node": "Write Maturity To Vault", "type": "main", "index": 0}
+      ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "tags": []
+}

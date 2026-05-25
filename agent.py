@@ -2028,6 +2028,18 @@ class Assistant(Agent):
         self._pending_clarification: PendingClarification | None = None
         self._clarification_resumers: dict[str, callable] = {}
         self._clarification_resumers["volume"] = self._resume_volume
+        # Vault-feedback tracking: the previous turn went to Hermes (LLM path
+        # wasn't intercepted by a local intent handler) at this monotonic
+        # timestamp.  The next on_user_turn_completed inspects the user's
+        # reply for accept/correct signals so the Hermes /v1/feedback endpoint
+        # can mark the corresponding vault entry — closing the
+        # self-improvement loop (Phase 3 of the vault-aware routing plan).
+        self._last_llm_turn_at: float = 0.0
+        self._feedback_url: str | None = None
+        _hurl = (os.environ.get("HERMES_URL") or "").strip().rstrip("/")
+        if _hurl:
+            self._feedback_url = f"{_hurl}/v1/feedback"
+        self._hermes_key: str = (os.environ.get("HERMES_API_KEY") or "").strip()
         self._wire_video(room)
 
     def _has_widget(self, kind: str) -> bool:
@@ -2038,6 +2050,63 @@ class Assistant(Agent):
         return any(
             (w.get("kind") or "").lower() == target for w in self._open_widgets
         )
+
+    # ── Vault feedback (Phase 3 of the self-improvement loop) ────────
+    # If the previous turn went through Hermes (LLM fall-through), the
+    # user's current reply can mark that interaction accepted or corrected.
+    # Hermes patches the vault entry's metadata, which feeds the n8n
+    # maturity cron, which over time downgrades repeat-domain calls to
+    # cheaper models.  All best-effort — feedback failure never blocks chat.
+    _NEG_FEEDBACK_RE = re.compile(
+        r"^\s*(?:no[,. ]|nope|actually|wait|that'?s wrong|that is wrong|"
+        r"that'?s not|i meant|i didn'?t|wrong|incorrect|stop)\b",
+        re.IGNORECASE,
+    )
+    _POS_FEEDBACK_RE = re.compile(
+        r"^\s*(?:thanks|thank you|perfect|great|nice|awesome|exactly|"
+        r"that'?s right|brilliant|cheers)\b",
+        re.IGNORECASE,
+    )
+    _FEEDBACK_TTL_S = 45.0
+
+    def _maybe_emit_vault_feedback(self, text: str) -> None:
+        if not self._feedback_url or not text:
+            return
+        last = self._last_llm_turn_at
+        if not last or (time.time() - last) > self._FEEDBACK_TTL_S:
+            return
+
+        signal: str | None = None
+        if self._NEG_FEEDBACK_RE.match(text):
+            signal = "corrected"
+        elif self._POS_FEEDBACK_RE.match(text):
+            signal = "accepted"
+        if signal is None:
+            return
+
+        # Consume the previous turn so we don't double-fire on the next utterance.
+        self._last_llm_turn_at = 0.0
+
+        session_id = self._room.name if self._room else ""
+        if not session_id:
+            return
+
+        async def _post() -> None:
+            headers: dict[str, str] = {}
+            if self._hermes_key:
+                headers["Authorization"] = f"Bearer {self._hermes_key}"
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    await client.post(
+                        self._feedback_url,
+                        json={"session_id": session_id, "signal": signal, "note": text[:120]},
+                        headers=headers,
+                    )
+                logger.info("vault feedback posted: session=%s signal=%s", session_id, signal)
+            except Exception as exc:
+                logger.debug("vault feedback post failed: %s", exc)
+
+        asyncio.create_task(_post())
 
     # ── Video capture (camera + screen-share) ────────────────────────
     def _wire_video(self, room: rtc.Room) -> None:
@@ -3560,6 +3629,14 @@ class Assistant(Agent):
         """
         text = getattr(new_message, "text_content", "") or ""
 
+        # Vault feedback (Phase 3): if the previous turn went through Hermes
+        # and the user is now correcting or affirming it, tell Hermes so the
+        # vault entry gets the success_flag — fuels the maturity cron.
+        try:
+            self._maybe_emit_vault_feedback(text)
+        except Exception:
+            pass
+
         # Diagnostic: every transcribed user turn lands here. Logging the
         # raw text + current awake state + wake-regex match lets us debug
         # wake-word misses from the Railway deploy log without needing
@@ -3661,6 +3738,12 @@ class Assistant(Agent):
         # (camera|cam|webcam|video) AND a polarity verb both match.
         if await self._maybe_handle_camera(text):
             raise StopResponse()
+
+        # Reached LLM fall-through: this turn will be sent to Hermes (vision
+        # injection below may add a frame, but the LLM call still happens).
+        # Stamp the timestamp so the next user turn can post accept/correct
+        # feedback against this Hermes interaction.
+        self._last_llm_turn_at = time.time()
 
         # ── Vision injection (only runs while awake) ─────────────────
         if not _is_vision_intent(text):
