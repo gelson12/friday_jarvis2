@@ -136,6 +136,59 @@ pause
     $env:JARVIS_MACHINE          = $MachineLabel
     $env:JARVIS_BRIDGE_ALLOW_SHELL = '1'
 
+    # 8. Auto-register the boot-start scheduled task (idempotent).
+    # The bridge should come back at every logon and auto-restart on
+    # crash, with NO manual ceremony. We attempt registration here so
+    # the user doesn't have to remember Step 4 in SETUP_NEW_MACHINE.md.
+    # Requires admin PS — if not admin, we skip with a clear note +
+    # reprint the one-liner so the user can finish manually.
+    $isAdmin = $false
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal $identity
+        $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {}
+    $taskBat = Join-Path $workDir 'run.bat'
+    if ($isAdmin) {
+        try {
+            if (Get-ScheduledTask -TaskName 'JarvisDesktopBridge' -ErrorAction SilentlyContinue) {
+                Write-Host "[OK] task 'JarvisDesktopBridge' already exists - re-registering for latest settings"
+                Unregister-ScheduledTask -TaskName 'JarvisDesktopBridge' -Confirm:$false
+            }
+            Register-ScheduledTask -TaskName 'JarvisDesktopBridge' -Force `
+                -Action (New-ScheduledTaskAction -Execute 'cmd.exe' `
+                    -Argument "/c `"$taskBat`"" `
+                    -WorkingDirectory $workDir) `
+                -Trigger (New-ScheduledTaskTrigger -AtLogon) `
+                -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                    -DontStopIfGoingOnBatteries -RestartCount 5 `
+                    -RestartInterval (New-TimeSpan -Minutes 1)) | Out-Null
+            Write-Host "[OK] boot-start task registered (AtLogon, auto-restart 5x/1min)"
+        } catch {
+            Write-Host "[WARN] Could not register the scheduled task: $_"
+            Write-Host "       The bridge will still run NOW from this window, but it"
+            Write-Host "       won't come back automatically at next logon. Run this"
+            Write-Host "       in an admin PowerShell to retro-fit:"
+            Write-Host "       (paste the block from SETUP_NEW_MACHINE.md Step 4)"
+        }
+    } else {
+        Write-Host ""
+        Write-Host "[INFO] Skipping boot-start task registration - this shell is not"
+        Write-Host "       running as administrator. To make the bridge auto-start"
+        Write-Host "       at logon, open ADMIN PowerShell and paste:"
+        Write-Host ""
+        Write-Host "  `$bat=`"$taskBat`""
+        Write-Host "  Register-ScheduledTask -TaskName 'JarvisDesktopBridge' -Force ``"
+        Write-Host "      -Action (New-ScheduledTaskAction -Execute 'cmd.exe' ``"
+        Write-Host "          -Argument `"/c ```"`$bat```"`" ``"
+        Write-Host "          -WorkingDirectory (Split-Path `$bat)) ``"
+        Write-Host "      -Trigger (New-ScheduledTaskTrigger -AtLogon) ``"
+        Write-Host "      -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries ``"
+        Write-Host "          -DontStopIfGoingOnBatteries -RestartCount 5 ``"
+        Write-Host "          -RestartInterval (New-TimeSpan -Minutes 1))"
+        Write-Host ""
+    }
+
     Write-Host ""
     Write-Host "================================================================="
     Write-Host " Starting bridge as desktop-bridge-$MachineLabel"

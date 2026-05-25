@@ -104,7 +104,12 @@ Expected: notepad opens on the new machine.
 
 ---
 
-## Step 4 — Optional: auto-start the bridge at logon
+## Step 4 — Recommended: auto-start the bridge at logon
+
+> **Auto-handled when you ran Step 2 in admin PowerShell.** The bootstrap
+> now registers the scheduled task itself if it has admin privileges.
+> Run `Get-ScheduledTask -TaskName JarvisDesktopBridge` — if it returns
+> a task, you're done. Otherwise (Step 2 wasn't admin), do this:
 
 Open **Administrator: Windows PowerShell** and paste:
 
