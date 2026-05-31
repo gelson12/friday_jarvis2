@@ -39,7 +39,7 @@ FROM python:3.11-slim AS runtime
 # Cache-bust: change this value to force Railway/buildkit to re-run all
 # subsequent layers when it would otherwise reuse a stale cached image.
 # (Bump the timestamp whenever the pipeline appears stuck on an old build.)
-ARG CACHEBUST=2026-05-20T16:30
+ARG CACHEBUST=2026-05-31T12:30-avengers-gate
 RUN echo "cache bust ${CACHEBUST}"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
