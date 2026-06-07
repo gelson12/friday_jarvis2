@@ -2162,6 +2162,10 @@ class Assistant(Agent):
         self._accommodation_init_attempted = False
         self._accommodation_last_results: list = []
         self._accommodation_pending_book: dict | None = None
+        # Pending search keeps a multi-turn conversation alive when the
+        # first turn was missing a required slot. See
+        # _maybe_resume_accommodation_search.
+        self._accommodation_pending_search: dict | None = None
         self._wire_video(room)
 
     def _has_widget(self, kind: str) -> bool:
@@ -2388,6 +2392,70 @@ class Assistant(Agent):
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("jarvis-ui publish failed: %s", exc)
+
+    async def _osiris_voice_alert_loop(self) -> None:
+        """Speak OSIRIS criticals aloud. Gated by env (off by default):
+
+          OSIRIS_VOICE_ALERTS=1   enable
+          OSIRIS_URL=<base>       OSIRIS instance to subscribe to
+
+        Subscribes to OSIRIS's SSE stream and, for each newly-seen entity with
+        threat HIGH/CRITICAL, says one concise line. Reconnects forever. Speaks
+        immediately on arrival (no blocking awaits) per the voice-latency rule.
+        """
+        enabled = (os.environ.get("OSIRIS_VOICE_ALERTS") or "").strip().lower()
+        if enabled not in ("1", "true", "yes", "on"):
+            return
+        base = (os.environ.get("OSIRIS_URL") or "").rstrip("/")
+        if not base:
+            return
+        url = f"{base}/api/sdk/stream"
+        seen: set[str] = set()
+        try:
+            import aiohttp
+        except Exception:  # noqa: BLE001
+            logger.warning("OSIRIS voice alerts: aiohttp unavailable")
+            return
+        logger.info("OSIRIS voice alerts: subscribing to %s", url)
+        while True:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        url, timeout=aiohttp.ClientTimeout(total=None, sock_read=120)
+                    ) as r:
+                        async for raw in r.content:
+                            line = raw.decode("utf-8", "ignore").strip()
+                            if not line.startswith("data:"):
+                                continue
+                            try:
+                                msg = json.loads(line[5:].strip())
+                            except Exception:  # noqa: BLE001
+                                continue
+                            if msg.get("type") != "entity_update":
+                                continue
+                            for e in msg.get("payload") or []:
+                                threat = str(e.get("threat", "")).upper()
+                                if threat not in ("HIGH", "CRITICAL"):
+                                    continue
+                                eid = str(e.get("id", ""))
+                                if not eid or eid in seen:
+                                    continue
+                                seen.add(eid)
+                                if len(seen) > 1000:
+                                    seen.clear()
+                                    seen.add(eid)
+                                name = e.get("name") or "an event"
+                                try:
+                                    await self.session.say(
+                                        f"Sir, OSIRIS flags a {threat.lower()} alert: {name}."
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("OSIRIS alert loop reconnecting: %s", exc)
+                await asyncio.sleep(10)
 
     async def _maybe_handle_camera(self, text: str) -> bool:
         """Voice-controlled camera enable/disable. Publishes a structured
@@ -2929,7 +2997,12 @@ class Assistant(Agent):
         )
 
     async def _maybe_handle_cti(self, text: str) -> bool:
-        """Operate OpenCTI via the LLM intent router (Path Y)."""
+        """Operate OpenCTI via the LLM intent router (Path Y).
+
+        RETIRED — OpenCTI dropped (OSIRIS covers intelligence). Inert no-op so it
+        never routes or spins up the container. The dead code below is kept until
+        this legacy agent is retired."""
+        return False
         if not text or not _CTI_HINT_RE.search(text):
             return False
 
@@ -3320,8 +3393,17 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
-        location = _accommodation_nlu.parse_location(text)
+        # Combine with any prior in-progress turn so follow-up info
+        # ("Somewhere in Lisbon" after "find me a hotel") parses with
+        # full context.
+        prior = self._accommodation_pending_search or {}
+        combined_text = ((prior.get("prior_text") or "") + " " + (text or "")).strip()
+        location = _accommodation_nlu.parse_location(combined_text)
         if not location:
+            self._accommodation_pending_search = {
+                "prior_text": combined_text,
+                "created_at": time.time(),
+            }
             try:
                 await self.session.say(
                     "Where would you like to stay, sir? Tell me a city or area."
@@ -3329,9 +3411,12 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
-        check_in, check_out = _accommodation_nlu.parse_dates(text)
-        guests = _accommodation_nlu.parse_guests(text)
-        preferred = _accommodation_nlu.parse_provider_preference(text)
+        check_in, check_out = _accommodation_nlu.parse_dates(combined_text)
+        guests = _accommodation_nlu.parse_guests(combined_text)
+        preferred = _accommodation_nlu.parse_provider_preference(combined_text)
+        # Slots filled — clear pending so a fresh "find me a hotel" later
+        # starts clean.
+        self._accommodation_pending_search = None
         query = _AccommodationSearchQuery(
             location=location,
             check_in=check_in,
@@ -3340,8 +3425,20 @@ class Assistant(Agent):
             currency=os.environ.get("ACCOMMODATION_DEFAULT_CURRENCY", "GBP"),
             preferred_providers=preferred,
         )
+        # Speak BEFORE awaiting a slow provider call so voice never goes
+        # silent. Apify Airbnb is the slow one (30-90s cold).
+        is_apify_query = preferred == ["apify_airbnb"]
         try:
-            properties = await asyncio.wait_for(service.search(query, limit=12), timeout=20.0)
+            await self.session.say(
+                "Just a moment, sir — looking into that for you."
+                if not is_apify_query
+                else "Just a moment, sir — Airbnb takes a little longer to search."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        # Worker timeout must exceed APIFY_AIRBNB_TIMEOUT_S (default 60s).
+        try:
+            properties = await asyncio.wait_for(service.search(query, limit=12), timeout=90.0)
         except asyncio.TimeoutError:
             try:
                 await self.session.say("The search took too long, sir.")
@@ -3382,6 +3479,29 @@ class Assistant(Agent):
                 ],
             },
         })
+        # Mirror the stays onto the OSIRIS globe as gold pins (best-effort,
+        # fire-and-forget so it never adds latency to the voice turn). No-ops
+        # unless OSIRIS_URL is configured. See osiris_signals.py.
+        try:
+            from osiris_signals import make_entity, publish_signals
+            pins = [
+                make_entity(
+                    id=f"stay-{p.provider_id}-{p.external_id}",
+                    name=p.name,
+                    lat=p.lat,
+                    lng=p.lng,
+                    color="#D4AF37",
+                    price=p.price_total,
+                    currency=p.price_currency,
+                    provider=p.provider_id,
+                )
+                for p in properties
+                if getattr(p, "lat", None) is not None and getattr(p, "lng", None) is not None
+            ]
+            if pins:
+                asyncio.create_task(publish_signals("accommodation", pins))
+        except Exception:  # noqa: BLE001
+            pass
         if not properties:
             try:
                 await self.session.say(
@@ -3455,8 +3575,14 @@ class Assistant(Agent):
             except Exception:  # noqa: BLE001
                 pass
             return True
+        # Speak ahead of the quote so voice never goes silent during the
+        # provider round-trip (LiteAPI prebook can take 5-10s).
         try:
-            quote = await asyncio.wait_for(service.quote(target), timeout=15.0)
+            await self.session.say("One moment, sir — locking in the price.")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            quote = await asyncio.wait_for(service.quote(target), timeout=20.0)
         except Exception as exc:  # noqa: BLE001
             logger.error("accommodation quote failed: %s", exc)
             try:
@@ -3574,6 +3700,22 @@ class Assistant(Agent):
             return False
         if _ACCOMMODATION_BOOK_RE.search(text) and self._accommodation_last_results:
             return await self._handle_accommodation_book_start(text)
+        return await self._handle_accommodation_search(text)
+
+    async def _maybe_resume_accommodation_search(self, text: str) -> bool:
+        """Continue an in-progress accommodation search when the previous
+        turn was missing a required slot (typically location). Routes the
+        current turn back to the search handler EVEN IF the keyword regex
+        doesn't match."""
+        pending = self._accommodation_pending_search
+        if not pending:
+            return False
+        if time.time() - pending["created_at"] > 120:
+            self._accommodation_pending_search = None
+            return False
+        if re.search(r"\b(weather|time|news|forget|never\s*mind|cancel|stop)\b", text or "", re.I):
+            self._accommodation_pending_search = None
+            return False
         return await self._handle_accommodation_search(text)
 
     async def _vault_write_note(self, rel_path: str, content: str) -> bool:
@@ -4435,6 +4577,13 @@ class Assistant(Agent):
         if await self._maybe_resume_accommodation_book(text):
             raise StopResponse()
 
+        # ── Accommodation search — multi-turn slot-fill continuation ──
+        # Runs BEFORE content so "in Lisbon" after "find me a hotel" routes
+        # back to the accommodation handler instead of being misread as
+        # a search query.
+        if await self._maybe_resume_accommodation_search(text):
+            raise StopResponse()
+
         # ── Screen content — search / video / news / maps / browser ──
         # Regex fallback: the voice LLM does not reliably emit tool calls,
         # so detect the intent here and run the real flow. We speak our
@@ -4449,11 +4598,11 @@ class Assistant(Agent):
         if await self._maybe_handle_accommodation(text):
             raise StopResponse()
 
-        # ── Intelligence — OpenCTI graph operations (Global Eyes) ─────
-        # Runs BEFORE desktop so "log foo.com as suspicious" doesn't get
-        # mistaken for a file op.
-        if await self._maybe_handle_cti(text):
-            raise StopResponse()
+        # ── OpenCTI threat-intel: RETIRED ────────────────────────────
+        # Dropped — OSIRIS covers the intelligence surface, the OpenCTI graph +
+        # connectors were unused, and the per-session→global spin-up was a race
+        # (audit J3). Dispatch removed; handler is inert below; the dead code is
+        # excised when this legacy agent is retired.
 
         # ── Desktop control — operate the user's Windows machines ────
         if await self._maybe_handle_desktop(text):
@@ -4594,6 +4743,10 @@ async def entrypoint(ctx: agents.JobContext):
             video_enabled=True,
         ),
     )
+
+    # Speak OSIRIS critical alerts aloud (no-op unless OSIRIS_VOICE_ALERTS=1
+    # and OSIRIS_URL are set). Runs for the life of the session.
+    asyncio.create_task(assistant._osiris_voice_alert_loop())
 
     # Relay live-browser interactions (click / scroll / key / navigate)
     # from the browser widget back to the worker's Playwright page.
