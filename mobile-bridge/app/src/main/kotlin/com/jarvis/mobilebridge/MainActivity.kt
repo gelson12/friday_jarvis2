@@ -1,8 +1,11 @@
 package com.jarvis.mobilebridge
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
@@ -84,10 +87,28 @@ class MainActivity : AppCompatActivity() {
         val missing = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }.toTypedArray()
-        if (missing.isEmpty()) {
-            Toast.makeText(this, "All permissions granted", Toast.LENGTH_SHORT).show()
-            return
+        if (missing.isNotEmpty()) {
+            requestPerms.launch(missing)
         }
-        requestPerms.launch(missing)
+        // SYSTEM_ALERT_WINDOW is a SPECIAL permission (granted on a Settings screen, not via a
+        // runtime dialog) and it's the one that lets the BACKGROUND bridge actually LAUNCH apps,
+        // set alarms, open the calendar, etc. Without it those commands silently no-op. Send the
+        // user to the overlay-permission screen if it isn't granted yet.
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(
+                this,
+                "IMPORTANT: turn ON 'Display over other apps' so Jarvis can open apps & set alarms.",
+                Toast.LENGTH_LONG,
+            ).show()
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                )
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+            }
+        } else if (missing.isEmpty()) {
+            Toast.makeText(this, "All permissions granted ✓", Toast.LENGTH_SHORT).show()
+        }
     }
 }

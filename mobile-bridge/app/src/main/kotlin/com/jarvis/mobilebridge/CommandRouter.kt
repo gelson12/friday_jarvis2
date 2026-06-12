@@ -9,6 +9,7 @@ import com.jarvis.mobilebridge.handlers.ContactsHandler
 import com.jarvis.mobilebridge.handlers.DeviceStatusHandler
 import com.jarvis.mobilebridge.handlers.DialHandler
 import com.jarvis.mobilebridge.handlers.HostInfoHandler
+import com.jarvis.mobilebridge.handlers.RingerHandler
 import com.jarvis.mobilebridge.handlers.SettingsPanelHandler
 import com.jarvis.mobilebridge.handlers.SmsHandler
 import com.jarvis.mobilebridge.handlers.TelegramHandler
@@ -38,6 +39,7 @@ class CommandRouter(private val ctx: Context) {
             "telegram_send" -> TelegramHandler.send(ctx, args)
             "device_status" -> DeviceStatusHandler.execute(ctx, args)
             "volume_set" -> VolumeHandler.set(ctx, args)
+            "ringer_set" -> RingerHandler.set(ctx, args)
             "alarm_set" -> AlarmHandler.set(ctx, args)
             "alarm_dismiss" -> AlarmHandler.dismiss(ctx, args)
             "calendar_add" -> CalendarHandler.add(ctx, args)

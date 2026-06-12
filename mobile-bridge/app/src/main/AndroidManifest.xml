@@ -12,6 +12,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- CRITICAL: lets the background bridge actually LAUNCH apps/activities. Without the
+         "Display over other apps" grant, Android 10+ silently blocks startActivity from the
+         background, so open_app reports success but nothing appears. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
     <!-- Phone control -->
     <uses-permission android:name="android.permission.READ_SMS" />
