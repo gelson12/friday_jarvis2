@@ -1,13 +1,18 @@
 package com.jarvis.mobilebridge
 
 import android.content.Context
+import com.jarvis.mobilebridge.handlers.AlarmHandler
 import com.jarvis.mobilebridge.handlers.AppHandler
 import com.jarvis.mobilebridge.handlers.BrowserHandler
+import com.jarvis.mobilebridge.handlers.CalendarHandler
 import com.jarvis.mobilebridge.handlers.ContactsHandler
 import com.jarvis.mobilebridge.handlers.DeviceStatusHandler
 import com.jarvis.mobilebridge.handlers.DialHandler
 import com.jarvis.mobilebridge.handlers.HostInfoHandler
+import com.jarvis.mobilebridge.handlers.SettingsPanelHandler
 import com.jarvis.mobilebridge.handlers.SmsHandler
+import com.jarvis.mobilebridge.handlers.TelegramHandler
+import com.jarvis.mobilebridge.handlers.VolumeHandler
 import com.jarvis.mobilebridge.handlers.WhatsAppHandler
 import org.json.JSONObject
 
@@ -30,7 +35,15 @@ class CommandRouter(private val ctx: Context) {
             "uninstall_app" -> AppHandler.uninstall(ctx, args)
             "open_url" -> BrowserHandler.openUrl(ctx, args)
             "whatsapp_send" -> WhatsAppHandler.send(ctx, args)
+            "telegram_send" -> TelegramHandler.send(ctx, args)
             "device_status" -> DeviceStatusHandler.execute(ctx, args)
+            "volume_set" -> VolumeHandler.set(ctx, args)
+            "alarm_set" -> AlarmHandler.set(ctx, args)
+            "alarm_dismiss" -> AlarmHandler.dismiss(ctx, args)
+            "calendar_add" -> CalendarHandler.add(ctx, args)
+            "calendar_remove" -> CalendarHandler.remove(ctx, args)
+            "wifi_panel" -> SettingsPanelHandler.wifi(ctx, args)
+            "hotspot_panel" -> SettingsPanelHandler.hotspot(ctx, args)
             else -> JSONObject().put("error", "unknown command '$cmd'")
         }
     } catch (e: Exception) {
