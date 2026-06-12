@@ -35,4 +35,13 @@ object Config {
         default = Build.MODEL.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-'),
     )
     fun controlRoom(ctx: Context) = get(ctx, "control_room", default = "jarvis-control")
+
+    /** The Jarvis HUD URL — the SAME web app served on Railway. Derived from the token
+     *  endpoint ("<base>/api/bridge" -> "<base>") unless an explicit ui_url override is saved. */
+    fun uiUrl(ctx: Context): String {
+        val override = get(ctx, "ui_url").trim()
+        if (override.isNotBlank()) return override
+        val ep = tokenEndpoint(ctx).trim()
+        return if (ep.contains("/api/")) ep.substringBefore("/api/") else ep.trimEnd('/')
+    }
 }

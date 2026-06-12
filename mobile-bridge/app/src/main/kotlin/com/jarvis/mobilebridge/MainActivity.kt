@@ -70,6 +70,17 @@ class MainActivity : AppCompatActivity() {
             BridgeService.stop(this)
             status.text = "Disconnected."
         }
+
+        findViewById<Button>(R.id.btn_jarvis).setOnClickListener {
+            // Save first so the UI URL reflects the latest token endpoint, then open the HUD.
+            Config.set(this, "token_endpoint", endpoint.text.toString().trim())
+            val ui = Config.uiUrl(this)
+            if (ui.isBlank()) {
+                Toast.makeText(this, "Enter the token endpoint URL first, sir.", Toast.LENGTH_LONG).show()
+            } else {
+                startActivity(Intent(this, JarvisActivity::class.java).putExtra("url", ui))
+            }
+        }
     }
 
     private fun requestNeededPermissions() {

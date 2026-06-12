@@ -20,6 +20,17 @@ object AppHandler {
         val name = args.optString("name").trim()
         val pm = ctx.packageManager
 
+        // OEM-varying "apps" (contacts / phone book, calculator) — open via the system category
+        // intent so they resolve on any device instead of a wrong package guess.
+        categoryIntentFor(name)?.let { ci ->
+            ci.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            return try {
+                ctx.startActivity(ci); JSONObject().put("opened", name.lowercase())
+            } catch (e: Exception) {
+                JSONObject().put("error", e.message ?: "could not open $name")
+            }
+        }
+
         val target = pkg.ifEmpty {
             if (name.isEmpty()) return JSONObject().put("error", "package or name required")
             findPackageByLabel(pm, name)
@@ -95,6 +106,16 @@ object AppHandler {
             JSONObject().put("error", e.message ?: "uninstall failed")
         }
     }
+
+    /** OEM-independent "apps" opened by system category rather than a guessed package. */
+    private fun categoryIntentFor(name: String): Intent? =
+        when (name.lowercase().replace(Regex("[^a-z]"), "")) {
+            "contacts", "phonebook", "addressbook", "people" ->
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_CONTACTS)
+            "calculator" ->
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_CALCULATOR)
+            else -> null
+        }
 
     private fun findPackageByLabel(pm: PackageManager, query: String): String? {
         val q = query.lowercase().trim()
