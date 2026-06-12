@@ -57,14 +57,15 @@ REPO_DIR="/workspace/${REPO_NAME}"
 APK_MODULE_DIR="${APK_MODULE_DIR-mobile-bridge}"
 TAG_PREFIX="${TAG_PREFIX:-mobile-bridge-v0.1.0-}"
 RELEASE_REPO="${RELEASE_REPO:-gelson12/friday_jarvis2}"
-# Module-relative path; if APK_MODULE_DIR is empty, becomes app/build/...
+# The build cd's INTO $MODULE_PATH before assembling, so the APK is ALWAYS at
+# app/build/... relative to there. Prefixing it with $APK_MODULE_DIR doubled the path
+# (mobile-bridge/mobile-bridge/app/...) -> the false "APK not found" failure.
 if [ -n "$APK_MODULE_DIR" ]; then
-    APK_REL_PATH="${APK_MODULE_DIR}/app/build/outputs/apk/debug/app-debug.apk"
     MODULE_PATH="/workspace/${REPO_NAME}/${APK_MODULE_DIR}"
 else
-    APK_REL_PATH="app/build/outputs/apk/debug/app-debug.apk"
     MODULE_PATH="/workspace/${REPO_NAME}"
 fi
+APK_REL_PATH="app/build/outputs/apk/debug/app-debug.apk"
 GRADLE_VER="${GRADLE_VER:-8.9}"
 LOG="${BUILD_LOG:-/tmp/mobile-bridge-build.log}"
 
