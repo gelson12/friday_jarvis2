@@ -30,16 +30,16 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete voice-built releases older than 24h
+      - name: Delete voice-built releases older than 72h
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          # 24h cutoff in ISO 8601 (UTC). Releases published BEFORE this
-          # timestamp are eligible for deletion.
-          CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
+          # 72h cutoff in ISO 8601 (UTC). Releases published BEFORE this
+          # timestamp are eligible for deletion (user spec: links live 72h).
+          CUTOFF=$(date -u -d '72 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
           echo "Cutoff: $CUTOFF  (anything published before this gets deleted)"
 
           # List up to 100 most-recent releases, filter to tags from
@@ -54,7 +54,7 @@ jobs:
                     | .tagName")
 
           if [ -z "$OLD_TAGS" ]; then
-            echo "No voice-built releases older than 24h. Nothing to do."
+            echo "No voice-built releases older than 72h. Nothing to do."
             exit 0
           fi
 
