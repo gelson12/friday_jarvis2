@@ -9,11 +9,13 @@ import com.jarvis.mobilebridge.handlers.ContactsHandler
 import com.jarvis.mobilebridge.handlers.DeviceStatusHandler
 import com.jarvis.mobilebridge.handlers.DialHandler
 import com.jarvis.mobilebridge.handlers.HostInfoHandler
+import com.jarvis.mobilebridge.handlers.LocationHandler
 import com.jarvis.mobilebridge.handlers.RingerHandler
 import com.jarvis.mobilebridge.handlers.SettingsPanelHandler
 import com.jarvis.mobilebridge.handlers.SmsHandler
 import com.jarvis.mobilebridge.handlers.TelegramHandler
 import com.jarvis.mobilebridge.handlers.VolumeHandler
+import com.jarvis.mobilebridge.handlers.WhatsAppCallHandler
 import com.jarvis.mobilebridge.handlers.WhatsAppHandler
 import org.json.JSONObject
 
@@ -36,7 +38,10 @@ class CommandRouter(private val ctx: Context) {
             "uninstall_app" -> AppHandler.uninstall(ctx, args)
             "open_url" -> BrowserHandler.openUrl(ctx, args)
             "whatsapp_send" -> WhatsAppHandler.send(ctx, args)
+            "whatsapp_call" -> WhatsAppCallHandler.call(ctx, args)
             "telegram_send" -> TelegramHandler.send(ctx, args)
+            "location_get" -> LocationHandler.get(ctx, args)
+            "location_panel" -> LocationHandler.panel(ctx)
             "device_status" -> DeviceStatusHandler.execute(ctx, args)
             "volume_set" -> VolumeHandler.set(ctx, args)
             "ringer_set" -> RingerHandler.set(ctx, args)
