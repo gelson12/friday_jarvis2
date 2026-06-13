@@ -28,18 +28,27 @@ object SettingsPanelHandler {
     }
 
     fun hotspot(ctx: Context, @Suppress("UNUSED_PARAMETER") args: JSONObject): JSONObject {
-        return try {
-            val tether = Intent().setClassName("com.android.settings", "com.android.settings.TetherSettings")
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // The tethering screen has no single standard intent — the component name
+        // differs by OEM (OPPO/ColorOS, Samsung, Pixel…). Try the known ones in
+        // order and launch the first that resolves.
+        val candidates = listOf(
+            Intent("android.settings.WIFI_AP_SETTINGS"),
+            Intent().setClassName("com.android.settings", "com.android.settings.TetherSettings"),
+            Intent().setClassName(
+                "com.android.settings", "com.android.settings.Settings\$TetherSettingsActivity"),
+            Intent().setClassName(
+                "com.android.settings", "com.android.settings.wifi.tether.WifiTetherSettings"),
+            Intent(Settings.ACTION_WIRELESS_SETTINGS),
+            Intent(Settings.ACTION_SETTINGS),
+        )
+        for (i in candidates) {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
-                ctx.startActivity(tether)
-            } catch (_: Exception) {
-                ctx.startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-            JSONObject().put("hotspot_settings_opened", true)
-                .put("note", "Android blocks apps from toggling the hotspot directly — opened tethering settings.")
-        } catch (e: Exception) {
-            JSONObject().put("error", e.message ?: "cannot open hotspot settings")
+                ctx.startActivity(i)
+                return JSONObject().put("hotspot_settings_opened", true)
+                    .put("note", "Android blocks apps from toggling the hotspot — opened the settings for a tap.")
+            } catch (_: Exception) { /* try the next candidate */ }
         }
+        return JSONObject().put("error", "couldn't open hotspot settings on this device")
     }
 }

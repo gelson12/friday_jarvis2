@@ -26,11 +26,14 @@ object VolumeHandler {
                 JSONObject().put("volume_percent", pct)
             }
             args.optString("direction").equals("up", true) || args.optBoolean("up") -> {
-                am.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, flags)
+                // Jump ~15% (one system step is barely audible on most phones).
+                val pct = (am.getStreamVolume(stream) * 100 / max + 15).coerceAtMost(100)
+                am.setStreamVolume(stream, (pct * max / 100.0).roundToInt(), flags)
                 JSONObject().put("adjusted", "up").put("volume_percent", am.getStreamVolume(stream) * 100 / max)
             }
             args.optString("direction").equals("down", true) || args.optBoolean("down") -> {
-                am.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, flags)
+                val pct = (am.getStreamVolume(stream) * 100 / max - 15).coerceAtLeast(0)
+                am.setStreamVolume(stream, (pct * max / 100.0).roundToInt(), flags)
                 JSONObject().put("adjusted", "down").put("volume_percent", am.getStreamVolume(stream) * 100 / max)
             }
             args.optBoolean("mute") -> {

@@ -5,6 +5,7 @@ import com.jarvis.mobilebridge.handlers.AlarmHandler
 import com.jarvis.mobilebridge.handlers.AppHandler
 import com.jarvis.mobilebridge.handlers.BrowserHandler
 import com.jarvis.mobilebridge.handlers.CalendarHandler
+import com.jarvis.mobilebridge.handlers.CallLogHandler
 import com.jarvis.mobilebridge.handlers.ContactsHandler
 import com.jarvis.mobilebridge.handlers.DeviceStatusHandler
 import com.jarvis.mobilebridge.handlers.DialHandler
@@ -32,6 +33,7 @@ class CommandRouter(private val ctx: Context) {
             "sms_send" -> SmsHandler.send(ctx, args)
             "contacts_search" -> ContactsHandler.search(ctx, args)
             "dial" -> DialHandler.execute(ctx, args)
+            "call_recent" -> CallLogHandler.dialRecent(ctx, args)
             "open_app" -> AppHandler.open(ctx, args)
             "list_apps" -> AppHandler.list(ctx, args)
             "install_app" -> AppHandler.install(ctx, args)
