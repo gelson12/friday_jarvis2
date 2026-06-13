@@ -9,6 +9,12 @@
     <!-- Foreground service to stay connected to LiveKit when the screen is off -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Remote mic/camera streaming to the HUD: the bridge runs as a foreground
+         service, and Android 14+ requires these to use mic/camera from it. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
@@ -83,7 +89,7 @@
         <service
             android:name=".BridgeService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|camera|microphone" />
 
         <!-- OPTIONAL WhatsApp auto-send. Disabled until the user enables it under
              Settings → Accessibility. Scoped to com.whatsapp only (see the xml). -->

@@ -91,7 +91,25 @@ class LiveKitClient(
                 val cmd = msg.optString("cmd")
                 val args = msg.optJSONObject("args") ?: JSONObject()
                 Log.i(tag, "exec $cmd $args")
-                val result = router.execute(cmd, args)
+                // Mic/camera publishing needs the Room's localParticipant, which the
+                // handlers (ctx-only) can't reach — so handle them HERE. Enabling
+                // publishes a track into jarvis-control; the web HUD subscribes to
+                // see/hear it. Android always shows the mic/camera privacy dot.
+                val result = when (cmd) {
+                    "mic_on", "mic_off" -> try {
+                        r.localParticipant.setMicrophoneEnabled(cmd == "mic_on")
+                        JSONObject().put("mic", if (cmd == "mic_on") "on" else "off")
+                    } catch (e: Exception) {
+                        JSONObject().put("error", e.message ?: "mic toggle failed")
+                    }
+                    "camera_on", "camera_off" -> try {
+                        r.localParticipant.setCameraEnabled(cmd == "camera_on")
+                        JSONObject().put("camera", if (cmd == "camera_on") "on" else "off")
+                    } catch (e: Exception) {
+                        JSONObject().put("error", e.message ?: "camera toggle failed — grant the Camera permission, sir")
+                    }
+                    else -> router.execute(cmd, args)
+                }
                 val reply = JSONObject()
                     .put("id", cmdId)
                     .put("machine", me)
