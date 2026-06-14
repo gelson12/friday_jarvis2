@@ -9,11 +9,13 @@
 set -u
 PKG=com.jarvis.mobilebridge
 LISTENER="$PKG/com.jarvis.mobilebridge.PhoneNotificationListener"
-APK="${1:-}"
+APK="${1:-}"            # optional path to Android-Update.apk
+RHOST="${2:-}"          # optional tailscale ip/host for a remote (Wi-Fi) connect
 PERMS=(READ_SMS SEND_SMS READ_CONTACTS CALL_PHONE ANSWER_PHONE_CALLS READ_PHONE_STATE \
        READ_CALL_LOG RECORD_AUDIO CAMERA ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION POST_NOTIFICATIONS)
 
 command -v adb >/dev/null 2>&1 || { echo "adb not found (install Android platform-tools)."; exit 1; }
+[ -n "$RHOST" ] && { echo "Connecting over the tailnet to $RHOST:5555..."; adb connect "$RHOST:5555"; }
 adb get-state >/dev/null 2>&1 || { echo "No authorised device. USB debugging, or 'adb connect <ip>:5555' first."; exit 1; }
 
 if [ -n "$APK" ]; then

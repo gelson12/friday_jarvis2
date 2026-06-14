@@ -15,7 +15,7 @@
   Already installed? omit -Apk to just grant.
   Needs Android platform-tools (adb) on PATH.
 #>
-param([string]$Apk = "")
+param([string]$Apk = "", [string]$RemoteHost = "")
 
 $PKG = "com.jarvis.mobilebridge"
 $LISTENER = "$PKG/com.jarvis.mobilebridge.PhoneNotificationListener"
@@ -30,6 +30,10 @@ $perms = @(
 
 if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
   Write-Host "adb not found. Install Android platform-tools and add it to PATH." -ForegroundColor Red; exit 1
+}
+if ($RemoteHost -ne "") {
+  Write-Host "Connecting over the tailnet to ${RemoteHost}:5555..." -ForegroundColor Cyan
+  & adb connect "${RemoteHost}:5555"
 }
 & adb get-state 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) {
