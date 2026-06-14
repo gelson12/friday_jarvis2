@@ -42,6 +42,7 @@ user privileges. Keep JARVIS_BRIDGE_ALLOW_SHELL off unless you need it.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
 import socket
@@ -103,6 +104,9 @@ def _cmd_open(args: dict) -> dict:
     target = args.get("target") or args.get("path") or ""
     if not target:
         return {"error": "no target"}
+    # Resolve a spoken folder name ("my downloads") to a real path; app names,
+    # URLs and explicit paths pass through unchanged.
+    target = _resolve_dir(target)
     try:
         os.startfile(target)  # noqa: S606 — Windows shell-open
         return {"opened": target}
@@ -150,7 +154,17 @@ def _cmd_write_file(args: dict) -> dict:
 
 
 def _cmd_make_dir(args: dict) -> dict:
-    path = os.path.expandvars(os.path.expanduser(args.get("path", "")))
+    """Create a folder. Either an explicit ``path``, or a ``name`` placed inside
+    a spoken ``parent`` folder (default the Desktop) — "make a folder called
+    Reports on my desktop"."""
+    name = (args.get("name") or "").strip().strip('"').strip("'")
+    if name and not args.get("path"):
+        parent = _resolve_dir(args.get("parent") or "desktop")
+        path = os.path.join(parent, name)
+    else:
+        path = _resolve_dir(args.get("path", ""))
+    if not path:
+        return {"error": "no folder name or path"}
     try:
         os.makedirs(path, exist_ok=True)
         return {"path": path, "created": True}
@@ -514,7 +528,7 @@ def _cmd_delete(args: dict) -> dict:
     """Delete a file or folder. Defaults to the Recycle Bin (recoverable).
     ``permanent=True`` deletes irreversibly; the router never opts in for
     voice commands."""
-    path = os.path.expandvars(os.path.expanduser(args.get("path", "")))
+    path = _resolve_dir(args.get("path", ""))
     if not path:
         return {"error": "no path"}
     if not os.path.exists(path):
@@ -826,6 +840,204 @@ def _cmd_http_proxy(args: dict) -> dict:
     return out
 
 
+# ── Known-folder resolution (the cloud worker can't know Windows paths) ──
+def _resolve_dir(spec: str) -> str:
+    """Map a spoken folder name ("my downloads", "the desktop", "documents
+    folder") to a real Windows path. Leaves real paths / app names / URLs
+    untouched, so it's safe to call from open/make_dir/delete/organize."""
+    n = (spec or "").strip().strip('"').strip("'")
+    if not n:
+        return ""
+    home = os.path.expanduser("~")
+    low = re.sub(r"\b(my|the|a|an)\b", " ", n.lower())
+    low = re.sub(r"\s*(folder|directory|dir)\s*$", "", low).strip()
+    known = {
+        "downloads": "Downloads", "download": "Downloads",
+        "documents": "Documents", "document": "Documents", "docs": "Documents",
+        "desktop": "Desktop",
+        "pictures": "Pictures", "picture": "Pictures", "photos": "Pictures", "images": "Pictures",
+        "music": "Music", "songs": "Music",
+        "videos": "Videos", "video": "Videos", "movies": "Videos",
+        "home": "", "user": "", "user folder": "",
+    }
+    if low in known:
+        return os.path.join(home, known[low]) if known[low] else home
+    return os.path.expandvars(os.path.expanduser(n))
+
+
+def _cmd_brightness(args: dict) -> dict:
+    """Adjust the built-in display brightness via WMI. up/down/set/max/min;
+    `level` 0-100 for set; `step` (default 20) for up/down. External monitors
+    need DDC/CI and usually won't respond — built-in laptop/ROG panel does."""
+    action = (args.get("action") or "").strip().lower()
+    current = None
+    try:
+        cur = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness).CurrentBrightness"],
+            capture_output=True, text=True, timeout=15)
+        line = (cur.stdout or "").strip().splitlines()
+        if line:
+            current = int(re.sub(r"\D", "", line[0]) or "0")
+    except Exception:  # noqa: BLE001
+        current = None
+    base = current if current is not None else 50
+    try:
+        step = int(args.get("step", 20))
+    except (TypeError, ValueError):
+        step = 20
+    if action == "set":
+        level = max(0, min(100, int(args.get("level", 50))))
+    elif action in ("max", "maximum", "full", "brightest"):
+        level = 100
+    elif action in ("min", "minimum", "dimmest"):
+        level = 10
+    elif action in ("up", "increase", "raise", "brighter", "brighten"):
+        level = min(100, base + step)
+    elif action in ("down", "decrease", "lower", "dimmer", "dim", "darken"):
+        level = max(0, base - step)
+    else:
+        return {"error": f"unknown brightness action '{action}'"}
+    ps = ("$m=Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods;"
+          f"Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{{Timeout=1;Brightness={level}}}")
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=15)
+        if p.returncode != 0:
+            return {"error": ("couldn't set brightness — built-in display only "
+                              "(external monitors need their own buttons)")[:300]}
+        return {"brightness": level}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+_ORGANIZE_MAP = {
+    "Images": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic", ".svg", ".tiff", ".ico"},
+    "Documents": {".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt", ".xls", ".xlsx",
+                  ".ppt", ".pptx", ".csv", ".md", ".epub"},
+    "Audio": {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma"},
+    "Video": {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".webm", ".flv"},
+    "Archives": {".zip", ".rar", ".7z", ".tar", ".gz", ".iso"},
+    "Installers": {".exe", ".msi"},
+    "Code": {".py", ".js", ".ts", ".java", ".c", ".cpp", ".cs", ".html", ".css",
+             ".json", ".xml", ".sh", ".ps1", ".rb", ".go", ".rs"},
+}
+
+
+def _cmd_organize_folder(args: dict) -> dict:
+    """Tidy a folder: move loose files into Images/Documents/Audio/Video/… by
+    type. Existing category subfolders are left alone, so it's re-runnable."""
+    path = _resolve_dir(args.get("path") or args.get("target") or "downloads")
+    if not os.path.isdir(path):
+        return {"error": f"not a folder: {path}"}
+    import shutil
+    cats = set(_ORGANIZE_MAP) | {"Other"}
+    moved: dict[str, int] = {}
+    try:
+        for entry in os.listdir(path):
+            src = os.path.join(path, entry)
+            if not os.path.isfile(src):
+                continue
+            ext = os.path.splitext(entry)[1].lower()
+            cat = next((c for c, exts in _ORGANIZE_MAP.items() if ext in exts), "Other")
+            dstdir = os.path.join(path, cat)
+            os.makedirs(dstdir, exist_ok=True)
+            try:
+                shutil.move(src, os.path.join(dstdir, entry))
+                moved[cat] = moved.get(cat, 0) + 1
+            except Exception:  # noqa: BLE001
+                pass
+        return {"organized": path, "moved": moved, "total": sum(moved.values())}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def _cmd_screenshot(args: dict) -> dict:
+    """Capture the whole screen to ~/Pictures/Jarvis and return the path."""
+    import time as _t
+    outdir = os.path.join(os.path.expanduser("~"), "Pictures", "Jarvis")
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, f"screenshot-{_t.strftime('%Y%m%d-%H%M%S')}.png")
+    try:
+        from PIL import ImageGrab
+        ImageGrab.grab(all_screens=True).save(path)
+        if args.get("open"):
+            try:
+                os.startfile(path)  # noqa: S606
+            except Exception:  # noqa: BLE001
+                pass
+        return {"screenshot": path}
+    except Exception:  # noqa: BLE001
+        pass
+    ps = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+          "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
+          "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
+          "$g=[System.Drawing.Graphics]::FromImage($bmp);"
+          "$g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size);"
+          f"$bmp.Save('{path}');$g.Dispose();$bmp.Dispose();")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True, timeout=20)
+        if os.path.exists(path):
+            return {"screenshot": path}
+        return {"error": "screenshot failed"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def _cmd_window(args: dict) -> dict:
+    """Manage windows: show_desktop/minimize_all, or minimize/maximize/restore/
+    close the active window."""
+    action = (args.get("action") or "").strip().lower().replace("-", "_")
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if action in ("show_desktop", "minimize_all", "minimise_all", "desktop"):
+            VK_LWIN, D = 0x5B, 0x44
+            user32.keybd_event(VK_LWIN, 0, 0, 0)
+            user32.keybd_event(D, 0, 0, 0)
+            user32.keybd_event(D, 0, 2, 0)
+            user32.keybd_event(VK_LWIN, 0, 2, 0)
+            return {"window": "show_desktop"}
+        hwnd = user32.GetForegroundWindow()
+        if action in ("minimize", "minimise"):
+            user32.ShowWindow(hwnd, 6); return {"window": "minimized"}
+        if action in ("maximize", "maximise"):
+            user32.ShowWindow(hwnd, 3); return {"window": "maximized"}
+        if action in ("restore",):
+            user32.ShowWindow(hwnd, 9); return {"window": "restored"}
+        if action in ("close",):
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            return {"window": "closed"}
+        return {"error": f"unknown window action '{action}'"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def _cmd_power(args: dict) -> dict:
+    """Power state: sleep / shutdown / restart / signout / hibernate / lock.
+    The worker confirm-gates the destructive ones before they ever get here."""
+    action = (args.get("action") or "").strip().lower().replace("-", "_")
+    try:
+        if action in ("sleep", "suspend"):
+            subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
+            return {"power": "sleep"}
+        if action in ("shutdown", "power_off", "poweroff", "turn_off"):
+            subprocess.Popen(["shutdown", "/s", "/t", "0"]); return {"power": "shutdown"}
+        if action in ("restart", "reboot"):
+            subprocess.Popen(["shutdown", "/r", "/t", "0"]); return {"power": "restart"}
+        if action in ("signout", "sign_out", "logoff", "log_off", "logout"):
+            subprocess.Popen(["shutdown", "/l"]); return {"power": "signout"}
+        if action in ("hibernate",):
+            subprocess.Popen(["shutdown", "/h"]); return {"power": "hibernate"}
+        if action in ("lock",):
+            import ctypes
+            ctypes.windll.user32.LockWorkStation(); return {"power": "lock"}
+        return {"error": f"unknown power action '{action}'"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 _HANDLERS = {
     "host_info": _cmd_host_info,
     "shell": _cmd_shell,
@@ -849,6 +1061,12 @@ _HANDLERS = {
     "play_media": _cmd_play_media,
     "lock_workstation": _cmd_lock_workstation,
     "http_proxy": _cmd_http_proxy,
+    # Phase 3 — brightness, folder tidy, screenshot, window + power control.
+    "brightness": _cmd_brightness,
+    "organize_folder": _cmd_organize_folder,
+    "screenshot": _cmd_screenshot,
+    "window": _cmd_window,
+    "power": _cmd_power,
 }
 
 

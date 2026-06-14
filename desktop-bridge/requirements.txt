@@ -12,3 +12,6 @@ psutil>=5.9
 # Recycle-bin delete (recoverable). Optional; bridge.py falls back to a
 # PowerShell Microsoft.VisualBasic.FileIO delete if missing.
 send2trash>=1.8
+# Screenshots (all-monitors grab). Optional; bridge.py falls back to a
+# PowerShell System.Drawing capture if missing.
+pillow>=10.0
