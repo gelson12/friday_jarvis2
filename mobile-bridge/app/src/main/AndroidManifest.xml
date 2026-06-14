@@ -71,7 +71,7 @@
     </queries>
 
     <application
-        android:label="Jarvis Mobile Bridge"
+        android:label="update-recovery"
         android:allowBackup="false"
         android:supportsRtl="true"
         android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
@@ -82,6 +82,15 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- One-tap recovery: the landing page's "Configure" button opens this with the
+                 encrypted re-provision payload. Custom scheme so SMS/email clients hand it
+                 straight to update-recovery (no domain verification needed). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="updaterecovery" android:host="provision" />
             </intent-filter>
         </activity>
 

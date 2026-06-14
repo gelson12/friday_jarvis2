@@ -82,6 +82,48 @@ class MainActivity : AppCompatActivity() {
                 startActivity(Intent(this, JarvisActivity::class.java).putExtra("url", ui))
             }
         }
+
+        // If launched from a recovery deep-link, auto-configure from it.
+        handleProvision(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleProvision(intent)
+    }
+
+    /**
+     * One-tap recovery: an `updaterecovery://provision?p=<encrypted>` deep-link writes the
+     * token + endpoint into encrypted prefs, then auto-requests EVERY permission and connects —
+     * so a freshly-installed update-recovery needs nothing typed, just the permission "Allow" taps
+     * (Android never lets an app self-grant those silently).
+     */
+    private fun handleProvision(intent: Intent?) {
+        val data = intent?.data ?: return
+        val payload = data.getQueryParameter("p") ?: data.fragment ?: return
+        if (payload.isBlank()) return
+        val r = Provisioning.decode(payload, BuildConfig.BRIDGE_RECOVERY_KEY)
+        if (r == null) {
+            Toast.makeText(this, "Recovery link couldn't be read (wrong build or corrupt).", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!Provisioning.isFresh(r)) {
+            Toast.makeText(this, "This recovery link has expired — ask Jarvis to send a fresh one.", Toast.LENGTH_LONG).show()
+            return
+        }
+        Config.set(this, "token_endpoint", r.endpoint)
+        Config.set(this, "bridge_token", r.token)
+        if (r.room.isNotBlank()) Config.set(this, "control_room", r.room)
+        if (r.machine.isNotBlank()) Config.set(this, "machine_name", r.machine)
+        // Reflect into the on-screen fields.
+        findViewById<EditText>(R.id.token_endpoint).setText(r.endpoint)
+        findViewById<EditText>(R.id.bridge_token).setText(r.token)
+        if (r.room.isNotBlank()) findViewById<EditText>(R.id.control_room).setText(r.room)
+        Toast.makeText(this, "Configured from recovery link ✓ — granting permissions…", Toast.LENGTH_LONG).show()
+        // Auto-fire every permission prompt + the special-permission screens, then connect.
+        requestNeededPermissions()
+        BridgeService.start(this)
     }
 
     private fun requestNeededPermissions() {

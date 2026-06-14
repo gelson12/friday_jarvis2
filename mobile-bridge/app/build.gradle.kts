@@ -13,6 +13,13 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        // Shared key for one-tap recovery provisioning (matches the worker's BRIDGE_RECOVERY_KEY).
+        // Injected at build time (-PBRIDGE_RECOVERY_KEY=… or env); empty for ordinary builds so the
+        // deep-link provisioning is simply inert until an update-recovery build bakes it in.
+        val recoveryKey = (project.findProperty("BRIDGE_RECOVERY_KEY") as String?)
+            ?: System.getenv("BRIDGE_RECOVERY_KEY") ?: ""
+        buildConfigField("String", "BRIDGE_RECOVERY_KEY", "\"$recoveryKey\"")
     }
 
     buildTypes {
@@ -27,7 +34,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { viewBinding = true }
+    buildFeatures {
+        viewBinding = true
+        buildConfig = true
+    }
 }
 
 dependencies {
