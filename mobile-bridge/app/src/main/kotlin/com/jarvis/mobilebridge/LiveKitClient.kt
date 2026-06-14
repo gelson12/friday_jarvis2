@@ -1,6 +1,7 @@
 package com.jarvis.mobilebridge
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import io.livekit.android.LiveKit
 import io.livekit.android.events.RoomEvent
@@ -108,6 +109,37 @@ class LiveKitClient(
                     } catch (e: Exception) {
                         JSONObject().put("error", e.message ?: "camera toggle failed — grant the Camera permission, sir")
                     }
+                    // Screen share via MediaProjection — needs a one-time on-screen
+                    // consent tap (Android security), so the first screen_on returns
+                    // "requested" and the track goes live once the user approves.
+                    "screen_on" -> try {
+                        val pend = ScreenShare.pending
+                        if (pend != null) {
+                            enableScreenShare(r, pend.second)
+                            JSONObject().put("screen", "on")
+                        } else {
+                            ScreenShare.onGranted = { _, data ->
+                                scope.launch {
+                                    try { enableScreenShare(r, data) }
+                                    catch (e: Exception) { Log.w(tag, "screen share enable failed", e) }
+                                }
+                            }
+                            ScreenShare.request(ctx)
+                            JSONObject().put("screen", "requested")
+                                .put("note", "approve the screen-capture prompt on the phone, sir")
+                        }
+                    } catch (e: Exception) {
+                        JSONObject().put("error", e.message ?: "screen share failed")
+                    }
+                    "screen_off" -> try {
+                        r.localParticipant.setScreenShareEnabled(false)
+                        ScreenShare.pending = null
+                        ScreenShare.onGranted = null
+                        BridgeService.setMediaProjection(ctx, false)
+                        JSONObject().put("screen", "off")
+                    } catch (e: Exception) {
+                        JSONObject().put("error", e.message ?: "screen stop failed")
+                    }
                     else -> router.execute(cmd, args)
                 }
                 val reply = JSONObject()
@@ -123,6 +155,13 @@ class LiveKitClient(
                 Log.e(tag, "command handling failed", e)
             }
         }
+    }
+
+    /** Promote the foreground service to the mediaProjection type (Android 14
+     * needs this active BEFORE capture starts), then publish the screen track. */
+    private suspend fun enableScreenShare(r: Room, data: Intent) {
+        BridgeService.setMediaProjection(ctx, true)
+        r.localParticipant.setScreenShareEnabled(true, data)
     }
 
     companion object {

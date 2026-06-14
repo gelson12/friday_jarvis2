@@ -13,6 +13,9 @@
          service, and Android 14+ requires these to use mic/camera from it. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Screen-share to the HUD: MediaProjection capture runs inside the foreground
+         service, which Android 14+ requires this type for. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -29,6 +32,8 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- Answer / end the ringing call from the dashboard. -->
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -89,7 +94,43 @@
         <service
             android:name=".BridgeService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|camera|microphone" />
+            android:foregroundServiceType="dataSync|camera|microphone|mediaProjection" />
+
+        <!-- Transparent, no-UI activity that pops the system "Start screen capture?"
+             consent (MediaProjection requires an Activity + a user tap; it can't be
+             silent). Result is handed to LiveKitClient to publish the screen track. -->
+        <activity
+            android:name=".ScreenCaptureActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleTask" />
+
+        <!-- Best-effort remote wake / keyguard-dismiss. Shows over the lock screen and
+             turns the display on; requestDismissKeyguard only clears a NON-secure
+             (swipe) lock — a PIN/pattern/biometric cannot be bypassed by any app. -->
+        <activity
+            android:name=".WakeActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleTask" />
+
+        <!-- Reads posted notifications so the dashboard can show them. Needs the
+             user to grant "Notification access" once (Settings → Notifications). -->
+        <service
+            android:name=".PhoneNotificationListener"
+            android:exported="false"
+            android:label="Jarvis Notifications"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <!-- OPTIONAL WhatsApp auto-send. Disabled until the user enables it under
              Settings → Accessibility. Scoped to com.whatsapp only (see the xml). -->

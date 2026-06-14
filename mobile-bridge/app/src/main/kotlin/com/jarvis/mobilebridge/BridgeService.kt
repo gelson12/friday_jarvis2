@@ -7,9 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 
 /**
  * Foreground service keeping the LiveKit connection alive when the
@@ -23,8 +25,12 @@ class BridgeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         ensureChannel()
-        startForeground(NOTIF_ID, buildNotification(status))
+        // Start WITHOUT mediaProjection — Android 14 kills a mediaProjection-typed
+        // FGS that has no active projection token. We promote to it only once the
+        // user grants screen capture (applyForegroundTypes(true)).
+        applyForegroundTypes(mediaProjection = false)
         client = LiveKitClient(this) { newStatus ->
             status = newStatus
             getSystemService(NotificationManager::class.java)
@@ -38,8 +44,30 @@ class BridgeService : Service() {
     }
 
     override fun onDestroy() {
+        instance = null
         client.stop()
         super.onDestroy()
+    }
+
+    /** Re-assert the foreground state with the right service types. On Android 14+
+     * the type must be explicit AND mediaProjection only while a projection is
+     * active; older versions take the types from the manifest, so the plain
+     * 2-arg call is enough. Fail-soft — never let this crash the service. */
+    fun applyForegroundTypes(mediaProjection: Boolean) {
+        val notif = buildNotification(status)
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                if (mediaProjection) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                ServiceCompat.startForeground(this, NOTIF_ID, notif, types)
+            } else {
+                startForeground(NOTIF_ID, notif)
+            }
+        } catch (e: Exception) {
+            try { startForeground(NOTIF_ID, notif) } catch (_: Exception) {}
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -77,6 +105,17 @@ class BridgeService : Service() {
     companion object {
         const val CHANNEL_ID = "jarvis_bridge_channel"
         const val NOTIF_ID = 0x4A52  // "JR" — anything stable + non-zero
+
+        /** The running service, so LiveKitClient can promote/demote the FGS type
+         * around screen capture without binding. */
+        @Volatile var instance: BridgeService? = null
+
+        /** Promote (active=true) or demote the foreground service to/from the
+         * mediaProjection type. No-op if the service isn't running. */
+        fun setMediaProjection(ctx: Context, active: Boolean) {
+            instance?.applyForegroundTypes(active)
+        }
+
         fun start(ctx: Context) {
             val i = Intent(ctx, BridgeService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)

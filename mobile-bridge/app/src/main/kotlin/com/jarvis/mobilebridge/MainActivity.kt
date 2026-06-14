@@ -13,6 +13,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
 /**
@@ -89,6 +90,7 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.SEND_SMS,
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.CALL_PHONE,
+            Manifest.permission.ANSWER_PHONE_CALLS,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.READ_CALL_LOG,
             Manifest.permission.RECORD_AUDIO,
@@ -124,6 +126,20 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (missing.isEmpty()) {
             Toast.makeText(this, "All permissions granted ✓", Toast.LENGTH_SHORT).show()
+        }
+        // Notification access is a SPECIAL grant (its own Settings screen) that lets
+        // the dashboard read the phone's notifications. Send the user there if it
+        // isn't enabled yet.
+        if (packageName !in NotificationManagerCompat.getEnabledListenerPackages(this)) {
+            Toast.makeText(
+                this,
+                "Optional: turn ON 'Notification access' for Jarvis so the dashboard can show your notifications.",
+                Toast.LENGTH_LONG,
+            ).show()
+            try {
+                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            } catch (_: Exception) {
+            }
         }
     }
 }

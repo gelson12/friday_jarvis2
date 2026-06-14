@@ -5,17 +5,20 @@ import com.jarvis.mobilebridge.handlers.AlarmHandler
 import com.jarvis.mobilebridge.handlers.AppHandler
 import com.jarvis.mobilebridge.handlers.BrowserHandler
 import com.jarvis.mobilebridge.handlers.CalendarHandler
+import com.jarvis.mobilebridge.handlers.CallControlHandler
 import com.jarvis.mobilebridge.handlers.CallLogHandler
 import com.jarvis.mobilebridge.handlers.ContactsHandler
 import com.jarvis.mobilebridge.handlers.DeviceStatusHandler
 import com.jarvis.mobilebridge.handlers.DialHandler
 import com.jarvis.mobilebridge.handlers.HostInfoHandler
 import com.jarvis.mobilebridge.handlers.LocationHandler
+import com.jarvis.mobilebridge.handlers.NotificationsHandler
 import com.jarvis.mobilebridge.handlers.RingerHandler
 import com.jarvis.mobilebridge.handlers.SettingsPanelHandler
 import com.jarvis.mobilebridge.handlers.SmsHandler
 import com.jarvis.mobilebridge.handlers.TelegramHandler
 import com.jarvis.mobilebridge.handlers.VolumeHandler
+import com.jarvis.mobilebridge.handlers.WakeHandler
 import com.jarvis.mobilebridge.handlers.WhatsAppCallHandler
 import com.jarvis.mobilebridge.handlers.WhatsAppHandler
 import org.json.JSONObject
@@ -53,6 +56,16 @@ class CommandRouter(private val ctx: Context) {
             "calendar_remove" -> CalendarHandler.remove(ctx, args)
             "wifi_panel" -> SettingsPanelHandler.wifi(ctx, args)
             "hotspot_panel" -> SettingsPanelHandler.hotspot(ctx, args)
+            // Phone dashboard — notifications, call control, remote wake/unlock.
+            // (screen_on/screen_off live in LiveKitClient — they need the Room.)
+            "notifications_list" -> NotificationsHandler.list(ctx, args)
+            "notifications_clear" -> NotificationsHandler.clear(ctx, args)
+            "call_answer" -> CallControlHandler.answer(ctx)
+            "call_end", "call_reject", "call_hangup" -> CallControlHandler.end(ctx)
+            "call_mute" -> CallControlHandler.mute(ctx, args)
+            "call_speaker" -> CallControlHandler.speaker(ctx, args)
+            "screen_wake" -> WakeHandler.wake(ctx, dismiss = false)
+            "keyguard_dismiss", "unlock_screen" -> WakeHandler.wake(ctx, dismiss = true)
             else -> JSONObject().put("error", "unknown command '$cmd'")
         }
     } catch (e: Exception) {
