@@ -71,7 +71,7 @@
     </queries>
 
     <application
-        android:label="update-recovery"
+        android:label="Jarvis Mobile Bridge"
         android:allowBackup="false"
         android:supportsRtl="true"
         android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
