@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 /**
@@ -63,7 +64,20 @@ class LiveKitClient(
                 room = r
                 onStatus("Connected to Jarvis")
                 backoffMs = 1000L
-                consumeEvents(r)
+                // Cellular carrier NAT silently kills an idle socket and the SDK doesn't
+                // always notice → the app shows "Connected" but the server dropped it (a
+                // zombie/half-open connection, so commands never arrive). keepAlive keeps
+                // the NAT mapping alive; the REFRESH ceiling proactively reconnects so a
+                // half-open can never linger more than a few minutes.
+                val ka = scope.launch { keepAlive(r) }
+                try {
+                    withTimeoutOrNull(REFRESH_MS) { consumeEvents(r) }
+                } finally {
+                    ka.cancel()
+                }
+                Log.i(tag, "periodic refresh — reconnecting")
+                try { r.disconnect() } catch (_: Exception) {}
+                room = null
             } catch (e: Exception) {
                 Log.w(tag, "connection lost", e)
                 onStatus("Reconnecting in ${backoffMs / 1000}s")
@@ -157,6 +171,26 @@ class LiveKitClient(
         }
     }
 
+    /** Heartbeat that keeps the cellular NAT mapping alive so the signaling socket
+     * can't go idle-dead. If a publish fails the socket is gone, so we disconnect
+     * to make the lifecycle reconnect (instead of sitting as a zombie). */
+    private suspend fun keepAlive(r: Room) {
+        while (true) {
+            delay(KEEPALIVE_MS)
+            try {
+                r.localParticipant.publishData(
+                    KEEPALIVE_PAYLOAD,
+                    reliability = DataPublishReliability.LOSSY,
+                    topic = TOPIC_KEEPALIVE,
+                )
+            } catch (e: Exception) {
+                Log.w(tag, "keepalive failed — dropping to reconnect", e)
+                try { r.disconnect() } catch (_: Exception) {}
+                return
+            }
+        }
+    }
+
     /** Promote the foreground service to the mediaProjection type (Android 14
      * needs this active BEFORE capture starts), then publish the screen track. */
     private suspend fun enableScreenShare(r: Room, data: Intent) {
@@ -167,5 +201,9 @@ class LiveKitClient(
     companion object {
         const val TOPIC_CMD = "mobile-cmd"
         const val TOPIC_RESULT = "mobile-result"
+        const val TOPIC_KEEPALIVE = "keepalive"
+        const val KEEPALIVE_MS = 15_000L        // < typical carrier NAT idle timeout
+        const val REFRESH_MS = 5 * 60_000L      // proactively reconnect every 5 min
+        private val KEEPALIVE_PAYLOAD = "ka".toByteArray(Charsets.UTF_8)
     }
 }
