@@ -22,6 +22,21 @@ android {
         buildConfigField("String", "BRIDGE_RECOVERY_KEY", "\"$recoveryKey\"")
     }
 
+    // STABLE signing key (committed jarvis-debug.keystore) so every build shares ONE
+    // signature — installs/updates go OVER the top, no uninstall + no re-entering the
+    // token. The build machine's auto-generated ~/.android/debug.keystore is ephemeral
+    // (regenerates on container reset → signature mismatch), which is exactly what we
+    // avoid by pinning our own. A debug keystore's password is the public default, so
+    // committing it is safe (it is NOT a release/Play key).
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("jarvis-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

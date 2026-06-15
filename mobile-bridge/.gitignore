@@ -9,10 +9,14 @@ gradle/wrapper/gradle-wrapper.jar
 *.iml
 captures/
 
-# Keystores — NEVER commit
+# Keystores — NEVER commit (release/Play keys stay secret)
 *.jks
 *.keystore
 keystore.properties
+# EXCEPTION: the pinned DEBUG keystore IS committed on purpose — a debug key's
+# password is the public default, and a stable signature is what lets APK updates
+# install over the top (no uninstall, no re-entering the token).
+!app/jarvis-debug.keystore
 
 # Build outputs
 *.apk
