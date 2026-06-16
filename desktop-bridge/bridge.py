@@ -1038,6 +1038,117 @@ def _cmd_power(args: dict) -> dict:
         return {"error": str(exc)}
 
 
+# ── Android phone control over ADB ───────────────────────────────────
+# The cloud worker can't reach the phone, and the bridge APP can't bypass a secure
+# keyguard (no Android API exists). But THIS laptop — on the same hotspot / USB and
+# authorised for ADB — can. These handlers are how Jarvis unlocks the phone's pattern
+# and grants silent screen-capture. OWNER'S OWN DEVICES ONLY.
+_BRIDGE_PKG = "com.jarvis.mobilebridge"
+_DEFAULT_PATTERN = os.environ.get("PHONE_PATTERN", "321478965").strip()
+
+
+def _adb_path() -> str | None:
+    """Locate adb.exe — the one the installer dropped, an Android SDK, or PATH."""
+    base = os.environ.get("LOCALAPPDATA", "") or os.environ.get("USERPROFILE", "")
+    cands = [
+        os.path.join(base, "JarvisDesktopBridge", "platform-tools", "adb.exe"),
+        os.path.join(base, "Android", "Sdk", "platform-tools", "adb.exe"),
+        "adb",
+    ]
+    for c in cands:
+        if c == "adb":
+            try:
+                subprocess.run(["adb", "version"], capture_output=True, timeout=8)
+                return "adb"
+            except Exception:  # noqa: BLE001
+                continue
+        elif c and os.path.exists(c):
+            return c
+    return None
+
+
+def _adb_target(serial: str = "") -> str | None:
+    """Resolve which phone to drive: an explicit serial/ip:port, the ADB_PHONE_ADDR env
+    (wireless), or the single attached USB device. Auto-`connect`s wireless addresses."""
+    adb = _adb_path()
+    if not adb:
+        return None
+    cand = serial or os.environ.get("ADB_PHONE_ADDR", "").strip()
+    if cand:
+        if ":" in cand:
+            try:
+                subprocess.run([adb, "connect", cand], capture_output=True, timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+        return cand
+    try:
+        p = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10)
+        devs = [ln.split("\t")[0] for ln in p.stdout.splitlines()[1:] if "\tdevice" in ln]
+        return devs[0] if devs else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _adb_sh(serial: str, *cmd: str, timeout: int = 15) -> tuple[int, str]:
+    adb = _adb_path()
+    if not adb:
+        return 1, "adb not found on this machine"
+    full = [adb] + (["-s", serial] if serial else []) + ["shell", *cmd]
+    try:
+        p = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except Exception as exc:  # noqa: BLE001
+        return 1, str(exc)
+
+
+def _cmd_unlock_phone(args: dict) -> dict:
+    """Unlock the phone's PATTERN over ADB so the screen is usable (e.g. for screen-share).
+    A secure keyguard can't be bypassed by an app or the cloud — only a trusted ADB host.
+    We clear the credential using the KNOWN pattern (which authorises the change even while
+    locked), then wake + dismiss the now-swipe keyguard. The pattern is restored by
+    relock_phone, or immediately if restore=true is passed."""
+    pattern = str(args.get("pattern") or _DEFAULT_PATTERN).strip()
+    serial = _adb_target(str(args.get("serial") or ""))
+    if not serial:
+        return {"error": "no phone reachable over ADB, sir — connect it by USB "
+                         "(or set ADB_PHONE_ADDR=ip:port for wireless debugging)"}
+    _adb_sh(serial, "input", "keyevent", "224")  # wake
+    rc, out = _adb_sh(serial, "locksettings", "clear", "--old", pattern)
+    if rc != 0 and "success" not in out.lower():
+        return {"error": f"unlock failed: {out[:200]} — check USB-debugging is authorised "
+                         "and the pattern is correct"}
+    _adb_sh(serial, "wm", "dismiss-keyguard")
+    _adb_sh(serial, "input", "keyevent", "82")
+    if str(args.get("restore", "")).lower() in ("1", "true", "yes"):
+        _adb_sh(serial, "locksettings", "set-pattern", pattern)
+        return {"unlocked": True, "pattern_restored": True, "serial": serial}
+    return {"unlocked": True, "pattern_cleared": True, "serial": serial,
+            "note": "pattern temporarily off — say 're-lock my phone' to restore it"}
+
+
+def _cmd_relock_phone(args: dict) -> dict:
+    """Restore the phone's pattern lock after an unlock."""
+    pattern = str(args.get("pattern") or _DEFAULT_PATTERN).strip()
+    serial = _adb_target(str(args.get("serial") or ""))
+    if not serial:
+        return {"error": "no phone reachable over ADB"}
+    rc, out = _adb_sh(serial, "locksettings", "set-pattern", pattern)
+    return {"relocked": (rc == 0 or "success" in out.lower()), "serial": serial,
+            "detail": out[:200]}
+
+
+def _cmd_grant_screen_capture(args: dict) -> dict:
+    """Grant the PROJECT_MEDIA app-op so the bridge screen-captures with NO consent popup
+    (owner's device, one-time via ADB; persists until the app is reinstalled)."""
+    pkg = str(args.get("package") or _BRIDGE_PKG)
+    serial = _adb_target(str(args.get("serial") or ""))
+    if not serial:
+        return {"error": "no phone reachable over ADB"}
+    _adb_sh(serial, "appops", "set", pkg, "PROJECT_MEDIA", "allow")
+    _, chk = _adb_sh(serial, "appops", "get", pkg, "PROJECT_MEDIA")
+    return {"granted": "allow" in chk.lower(), "serial": serial, "detail": chk[:200]}
+
+
 _HANDLERS = {
     "host_info": _cmd_host_info,
     "shell": _cmd_shell,
@@ -1067,6 +1178,11 @@ _HANDLERS = {
     "screenshot": _cmd_screenshot,
     "window": _cmd_window,
     "power": _cmd_power,
+    # Android phone control over ADB (owner's device): unlock the pattern, re-lock it,
+    # and grant silent screen-capture.
+    "unlock_phone": _cmd_unlock_phone,
+    "relock_phone": _cmd_relock_phone,
+    "grant_screen_capture": _cmd_grant_screen_capture,
 }
 
 
