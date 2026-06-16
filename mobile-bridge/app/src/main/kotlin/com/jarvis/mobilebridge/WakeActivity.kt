@@ -4,7 +4,7 @@ import android.app.KeyguardManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
 
 /**
  * Best-effort remote wake / unlock. Turns the display on and shows over the lock
