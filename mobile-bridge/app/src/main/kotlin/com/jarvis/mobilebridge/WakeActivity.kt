@@ -15,7 +15,7 @@ import androidx.activity.ComponentActivity
  * password or biometric CANNOT be entered or bypassed by any app — there is no
  * such API. For remote screen-share, keep the phone on swipe/Smart-Lock.
  */
-class WakeActivity : AppCompatActivity() {
+class WakeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
