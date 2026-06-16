@@ -1416,25 +1416,28 @@ def _cmd_phone_download_media(args: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"error": f"can't create {dest}: {exc}"}
     count = max(1, min(50, int(args.get("count", 10) or 10)))
-    # Newest files first across the usual media folders (toybox ls -t).
-    dirs = "/sdcard/DCIM/Camera /sdcard/Pictures /sdcard/Download /sdcard/Movies"
-    _, out = _adb_sh(serial, "sh", "-c",
-                     f"ls -1t {dirs} 2>/dev/null | grep -iE '\\.(jpg|jpeg|png|gif|mp4|mov|webp)$' | head -{count}",
-                     timeout=20)
-    # ls of multiple dirs gives bare filenames; re-resolve full paths by searching each dir.
-    names = [n.strip() for n in out.splitlines() if n.strip()]
+    exts = (".jpg", ".jpeg", ".png", ".gif", ".mp4", ".mov", ".webp", ".heic")
+    folders = ["/sdcard/DCIM/Camera", "/sdcard/Pictures/Screenshots",
+               "/sdcard/Pictures", "/sdcard/Download", "/sdcard/Movies"]
+    # Gather newest-first full paths per folder (toybox `ls -1t`), filter media in Python.
+    candidates = []
+    for folder in folders:
+        _, out = _adb_sh(serial, "sh", "-c", f"ls -1t '{folder}' 2>/dev/null | head -{count}", timeout=15)
+        for name in out.splitlines():
+            name = name.strip()
+            if name and name.lower().endswith(exts):
+                candidates.append(f"{folder}/{name}")
+        if len(candidates) >= count:
+            break
     pulled = []
-    for name in names[:count]:
-        for folder in ("/sdcard/DCIM/Camera", "/sdcard/Pictures", "/sdcard/Download", "/sdcard/Movies"):
-            src = f"{folder}/{name}"
-            try:
-                r = subprocess.run([adb, "-s", serial, "pull", src, dest],
-                                   capture_output=True, text=True, timeout=120)
-                if r.returncode == 0 and "pulled" in (r.stdout + r.stderr).lower():
-                    pulled.append(name)
-                    break
-            except Exception:  # noqa: BLE001
-                continue
+    for src in candidates[:count]:
+        try:
+            r = subprocess.run([adb, "-s", serial, "pull", src, dest],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and "pulled" in (r.stdout + r.stderr).lower():
+                pulled.append(src.rsplit("/", 1)[-1])
+        except Exception:  # noqa: BLE001
+            continue
     return {"downloaded": len(pulled), "dest": dest, "files": pulled[:10]}
 
 
