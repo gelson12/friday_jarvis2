@@ -27,10 +27,13 @@ class BridgeService : Service() {
         super.onCreate()
         instance = this
         ensureChannel()
-        // Start WITHOUT mediaProjection — Android 14 kills a mediaProjection-typed
-        // FGS that has no active projection token. We promote to it only once the
-        // user grants screen capture (applyForegroundTypes(true)).
-        applyForegroundTypes(mediaProjection = false)
+        // Go foreground as plain dataSync ONLY. Starting with camera/microphone (or
+        // mediaProjection) FGS types on Android 14/15 throws — especially on a background
+        // revival — so startForeground() never completes and the OS kills us with
+        // "ForegroundServiceDidNotStartInTimeException" (which the revival watchdog then
+        // turned into a crash-loop). We add those capture types ONLY while a capture is
+        // actually live (addType/dropType).
+        startFg()
         client = LiveKitClient(this) { newStatus ->
             status = newStatus
             getSystemService(NotificationManager::class.java)
@@ -40,6 +43,10 @@ class BridgeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Re-assert foreground on EVERY (re)start so a repeated startForegroundService()
+        // call (the alarm/WorkManager revival fires one each cycle) can never trip the
+        // "did not start in time" kill.
+        startFg()
         // Arm both watchdogs on every start (idempotent): the ~1-min exact alarm and the
         // 15-min WorkManager job. Either one re-launches us if the OS kills the process.
         RestartReceiver.scheduleNext(this)
@@ -63,26 +70,31 @@ class BridgeService : Service() {
         super.onDestroy()
     }
 
-    /** Re-assert the foreground state with the right service types. On Android 14+
-     * the type must be explicit AND mediaProjection only while a projection is
-     * active; older versions take the types from the manifest, so the plain
-     * 2-arg call is enough. Fail-soft — never let this crash the service. */
-    fun applyForegroundTypes(mediaProjection: Boolean) {
+    /** Capture types beyond the always-on dataSync (camera/microphone/mediaProjection),
+     * OR'd in only while a capture is live. */
+    @Volatile private var extraTypes = 0
+
+    /** Go (or stay) foreground. Always at least dataSync — which is allowed even on a
+     * background revival of a battery-exempt app — plus whatever capture types are
+     * currently live. If the system rejects the capture types (e.g. a background
+     * camera/mic start on Android 14+), we degrade to dataSync rather than crash:
+     * startForeground MUST succeed or the OS kills us with "did not start in time". */
+    private fun startFg() {
         val notif = buildNotification(status)
-        try {
-            if (Build.VERSION.SDK_INT >= 34) {
-                var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                if (mediaProjection) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                ServiceCompat.startForeground(this, NOTIF_ID, notif, types)
-            } else {
-                startForeground(NOTIF_ID, notif)
-            }
-        } catch (e: Exception) {
+        if (Build.VERSION.SDK_INT < 34) {
             try { startForeground(NOTIF_ID, notif) } catch (_: Exception) {}
+            return
         }
+        val want = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or extraTypes
+        for (t in intArrayOf(want, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)) {
+            try { ServiceCompat.startForeground(this, NOTIF_ID, notif, t); return }
+            catch (e: Exception) { android.util.Log.w("BridgeService", "startForeground($t) rejected", e) }
+        }
+        try { startForeground(NOTIF_ID, notif) } catch (_: Exception) {}
     }
+
+    private fun addType(t: Int) { extraTypes = extraTypes or t; startFg() }
+    private fun dropType(t: Int) { extraTypes = extraTypes and t.inv(); startFg() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -124,10 +136,29 @@ class BridgeService : Service() {
          * around screen capture without binding. */
         @Volatile var instance: BridgeService? = null
 
-        /** Promote (active=true) or demote the foreground service to/from the
-         * mediaProjection type. No-op if the service isn't running. */
+        /** Add/remove the mediaProjection FGS type around screen capture (must be active
+         * BEFORE setScreenShareEnabled on Android 14+). No-op if the service isn't running. */
         fun setMediaProjection(ctx: Context, active: Boolean) {
-            instance?.applyForegroundTypes(active)
+            instance?.let {
+                if (active) it.addType(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                else it.dropType(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            }
+        }
+
+        /** Add/remove the microphone FGS type around mic publishing (Android 14+ needs it). */
+        fun setMicType(active: Boolean) {
+            instance?.let {
+                if (active) it.addType(ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                else it.dropType(ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            }
+        }
+
+        /** Add/remove the camera FGS type around camera publishing (Android 14+ needs it). */
+        fun setCameraType(active: Boolean) {
+            instance?.let {
+                if (active) it.addType(ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+                else it.dropType(ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+            }
         }
 
         fun start(ctx: Context) {

@@ -126,13 +126,19 @@ class LiveKitClient(
                 // see/hear it. Android always shows the mic/camera privacy dot.
                 val result = when (cmd) {
                     "mic_on", "mic_off" -> try {
+                        // Promote the FGS to the microphone type BEFORE publishing (A14+),
+                        // demote after stopping — the service starts as plain dataSync now.
+                        if (cmd == "mic_on") BridgeService.setMicType(true)
                         r.localParticipant.setMicrophoneEnabled(cmd == "mic_on")
+                        if (cmd == "mic_off") BridgeService.setMicType(false)
                         JSONObject().put("mic", if (cmd == "mic_on") "on" else "off")
                     } catch (e: Exception) {
                         JSONObject().put("error", e.message ?: "mic toggle failed")
                     }
                     "camera_on", "camera_off" -> try {
+                        if (cmd == "camera_on") BridgeService.setCameraType(true)
                         r.localParticipant.setCameraEnabled(cmd == "camera_on")
+                        if (cmd == "camera_off") BridgeService.setCameraType(false)
                         JSONObject().put("camera", if (cmd == "camera_on") "on" else "off")
                     } catch (e: Exception) {
                         JSONObject().put("error", e.message ?: "camera toggle failed — grant the Camera permission, sir")
