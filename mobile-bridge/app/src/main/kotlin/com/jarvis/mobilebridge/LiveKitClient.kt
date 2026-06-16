@@ -264,20 +264,41 @@ class LiveKitClient(
         screenRoom = r
         try { screenCapturer?.stop() } catch (_: Exception) {}
         var frameN = 0
+        var frameSeq = 0
         val cap = ScreenCapturer(ctx) { jpeg ->
             frameN++
-            if (frameN <= 3 || frameN % 15 == 0) ScreenShare.log("frame #$frameN size=${jpeg.size}")
             val rr = screenRoom ?: return@ScreenCapturer
+            // LiveKit caps a single reliable data message at 15000 bytes, but a JPEG screen
+            // frame is ~20-35KB. So we split each frame into <15KB chunks with an 8-byte
+            // header (frameId u32-LE, chunkIndex u8, chunkCount u8, 2 reserved) and publish
+            // them in order on one coroutine (RELIABLE preserves order). The dashboard
+            // reassembles by frameId. See phonedash-widget.tsx.
+            val fid = frameSeq++
+            val total = ((jpeg.size + MAX_CHUNK_PAYLOAD - 1) / MAX_CHUNK_PAYLOAD).coerceAtLeast(1)
+            if (frameN <= 3 || frameN % 30 == 0)
+                ScreenShare.log("frame #$frameN size=${jpeg.size} -> $total chunk(s)")
             scope.launch {
                 try {
-                    rr.localParticipant.publishData(
-                        jpeg, reliability = DataPublishReliability.RELIABLE, topic = TOPIC_SCREEN_FRAME)
+                    for (idx in 0 until total) {
+                        val start = idx * MAX_CHUNK_PAYLOAD
+                        val end = minOf(start + MAX_CHUNK_PAYLOAD, jpeg.size)
+                        val msg = ByteArray(8 + (end - start))
+                        msg[0] = (fid and 0xFF).toByte()
+                        msg[1] = ((fid shr 8) and 0xFF).toByte()
+                        msg[2] = ((fid shr 16) and 0xFF).toByte()
+                        msg[3] = ((fid shr 24) and 0xFF).toByte()
+                        msg[4] = (idx and 0xFF).toByte()
+                        msg[5] = (total and 0xFF).toByte()
+                        System.arraycopy(jpeg, start, msg, 8, end - start)
+                        rr.localParticipant.publishData(
+                            msg, reliability = DataPublishReliability.RELIABLE, topic = TOPIC_SCREEN_FRAME)
+                    }
                 } catch (e: Exception) {
                     if (frameN <= 3) ScreenShare.log("publish frame#$frameN failed: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
         }
-        cap.start(resultCode, data, maxW = 400, fps = 3)
+        cap.start(resultCode, data, maxW = 420, fps = 3)
         screenCapturer = cap
         ScreenShare.log("custom capturer: virtual display up, streaming frames")
     }
@@ -302,6 +323,9 @@ class LiveKitClient(
         const val TOPIC_RESULT = "mobile-result"
         const val TOPIC_KEEPALIVE = "keepalive"
         const val TOPIC_SCREEN_FRAME = "phone-frame"  // JPEG frames from the app-only capturer
+        // LiveKit hard-caps a reliable data message at 15000 bytes; 8 bytes go to the chunk
+        // header, leave margin -> 14000-byte payload slices.
+        const val MAX_CHUNK_PAYLOAD = 14000
         const val KEEPALIVE_MS = 15_000L        // < typical carrier NAT idle timeout
         const val REFRESH_MS = 5 * 60_000L      // proactively reconnect every 5 min
         private val KEEPALIVE_PAYLOAD = "ka".toByteArray(Charsets.UTF_8)
