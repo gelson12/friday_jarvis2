@@ -155,8 +155,25 @@ class LiveKitClient(
                         } else {
                             ScreenShare.onGranted = { _, data ->
                                 scope.launch {
-                                    try { enableScreenShare(r, data) }
-                                    catch (e: Exception) { Log.w(tag, "screen share enable failed", e) }
+                                    val sres = try {
+                                        enableScreenShare(r, data)
+                                        JSONObject().put("screen", "on")
+                                    } catch (e: Exception) {
+                                        Log.w(tag, "screen share enable failed", e)
+                                        JSONObject().put("screen", "error")
+                                            .put("detail", (e.message ?: e.toString()).take(400))
+                                    }
+                                    // Report the post-consent result back over the room (the app's
+                                    // own logs are filtered on ColorOS), so failures are visible.
+                                    try {
+                                        r.localParticipant.publishData(
+                                            JSONObject().put("id", "screen_grant")
+                                                .put("machine", Config.machineName(ctx).lowercase())
+                                                .put("result", sres).toString().toByteArray(Charsets.UTF_8),
+                                            reliability = DataPublishReliability.RELIABLE,
+                                            topic = TOPIC_RESULT,
+                                        )
+                                    } catch (_: Exception) {}
                                 }
                             }
                             ScreenShare.request(ctx)
