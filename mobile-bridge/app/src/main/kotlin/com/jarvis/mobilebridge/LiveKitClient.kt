@@ -263,16 +263,21 @@ class LiveKitClient(
         ScreenShare.log("custom capturer: starting (rc=$resultCode)")
         screenRoom = r
         try { screenCapturer?.stop() } catch (_: Exception) {}
+        var frameN = 0
         val cap = ScreenCapturer(ctx) { jpeg ->
+            frameN++
+            if (frameN <= 3 || frameN % 15 == 0) ScreenShare.log("frame #$frameN size=${jpeg.size}")
             val rr = screenRoom ?: return@ScreenCapturer
             scope.launch {
                 try {
                     rr.localParticipant.publishData(
                         jpeg, reliability = DataPublishReliability.RELIABLE, topic = TOPIC_SCREEN_FRAME)
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    if (frameN <= 3) ScreenShare.log("publish frame#$frameN failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
             }
         }
-        cap.start(resultCode, data, maxW = 460, fps = 3)
+        cap.start(resultCode, data, maxW = 400, fps = 3)
         screenCapturer = cap
         ScreenShare.log("custom capturer: virtual display up, streaming frames")
     }
