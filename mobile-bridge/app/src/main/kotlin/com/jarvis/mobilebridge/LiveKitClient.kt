@@ -193,6 +193,28 @@ class LiveKitClient(
                     } catch (e: Exception) {
                         JSONObject().put("error", e.message ?: "screen stop failed")
                     }
+                    // APP-ONLY remote control via the accessibility service (no laptop/ADB).
+                    // Coords are normalised (0..1) from the dashboard.
+                    "phone_tap" -> {
+                        val svc = ControlAccessibilityService.instance
+                        if (svc == null) JSONObject().put("error", "enable Jarvis under Settings → Accessibility, sir")
+                        else { svc.tapNorm(args.optDouble("nx", 0.5), args.optDouble("ny", 0.5)); JSONObject().put("tapped", true) }
+                    }
+                    "phone_swipe" -> {
+                        val svc = ControlAccessibilityService.instance
+                        if (svc == null) JSONObject().put("error", "enable Jarvis under Settings → Accessibility, sir")
+                        else {
+                            svc.swipeNorm(args.optDouble("nx1", 0.5), args.optDouble("ny1", 0.5),
+                                args.optDouble("nx2", 0.5), args.optDouble("ny2", 0.5),
+                                args.optLong("ms", 180L))
+                            JSONObject().put("swiped", true)
+                        }
+                    }
+                    "phone_key" -> {
+                        val svc = ControlAccessibilityService.instance
+                        if (svc == null) JSONObject().put("error", "enable Jarvis under Settings → Accessibility, sir")
+                        else JSONObject().put("key", svc.globalKey(args.optString("key")))
+                    }
                     else -> router.execute(cmd, args)
                 }
                 val reply = JSONObject()

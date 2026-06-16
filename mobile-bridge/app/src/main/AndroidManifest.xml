@@ -178,5 +178,20 @@
                 android:resource="@xml/whatsapp_send_service" />
         </service>
 
+        <!-- APP-ONLY remote control: gesture injection so the dashboard can tap/swipe the
+             phone with no laptop/ADB. Owner enables it once under Settings → Accessibility. -->
+        <service
+            android:name=".ControlAccessibilityService"
+            android:exported="false"
+            android:label="Jarvis Remote Control"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/control_accessibility_service" />
+        </service>
+
     </application>
 </manifest>

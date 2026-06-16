@@ -242,5 +242,30 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        // App-only remote control (tap/swipe the phone from the dashboard with NO laptop)
+        // needs the Accessibility service enabled once. Send the user there if it's off.
+        if (!isAccessibilityEnabled()) {
+            Toast.makeText(
+                this,
+                "Optional: enable 'Jarvis Remote Control' under Accessibility to control the phone from the dashboard without a laptop.",
+                Toast.LENGTH_LONG,
+            ).show()
+            try {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        return try {
+            val flat = Settings.Secure.getString(
+                contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: return false
+            flat.contains("$packageName/.ControlAccessibilityService") ||
+                flat.contains("$packageName/com.jarvis.mobilebridge.ControlAccessibilityService")
+        } catch (_: Exception) {
+            false
+        }
     }
 }

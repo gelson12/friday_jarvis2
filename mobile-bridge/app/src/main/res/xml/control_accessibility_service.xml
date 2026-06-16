@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Remote-control accessibility service: gesture injection (taps/swipes) onto any app
+     so the dashboard can drive the phone with no laptop/ADB. canPerformGestures is the
+     key flag that enables dispatchGesture. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canPerformGestures="true"
+    android:accessibilityFlags="flagDefault"
+    android:notificationTimeout="100" />
