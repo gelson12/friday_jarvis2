@@ -40,12 +40,26 @@ class BridgeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Arm both watchdogs on every start (idempotent): the ~1-min exact alarm and the
+        // 15-min WorkManager job. Either one re-launches us if the OS kills the process.
+        RestartReceiver.scheduleNext(this)
+        KeepAliveWorker.enqueue(this)
         return START_STICKY
+    }
+
+    /** ColorOS (and most aggressive OEMs) kill the service when the user swipes the app
+     * off the recents screen. Schedule an immediate restart so it comes straight back. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        RestartReceiver.scheduleNext(this)
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
         instance = null
         client.stop()
+        // If we're being torn down (low-memory kill, OEM cleanup), make sure a wake-up is
+        // pending so the service is resurrected rather than gone for good.
+        RestartReceiver.scheduleNext(this)
         super.onDestroy()
     }
 

@@ -72,6 +72,11 @@ dependencies {
     // Coroutines (LiveKit SDK requires them; convenient for IO + main mixing).
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
 
+    // WorkManager — system-scheduled periodic worker that RESTARTS the bridge service
+    // even after the OS has killed the whole process (a plain in-process loop can't, it
+    // dies with the process). Core of the self-revival on aggressive OEMs like ColorOS.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
     // HTTP — for the token-endpoint POST.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 

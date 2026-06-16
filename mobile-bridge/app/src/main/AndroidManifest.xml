@@ -20,6 +20,13 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Self-revival: restart the bridge after device boot, schedule exact wake-ups to
+         restart it if the OS kills the process, and ask to be exempt from battery
+         optimisation so aggressive OEMs (ColorOS/MIUI/EMUI) stop killing it. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- CRITICAL: lets the background bridge actually LAUNCH apps/activities. Without the
          "Display over other apps" grant, Android 10+ silently blocks startActivity from the
@@ -104,6 +111,22 @@
             android:name=".BridgeService"
             android:exported="false"
             android:foregroundServiceType="dataSync|camera|microphone|mediaProjection" />
+
+        <!-- Self-revival receiver: starts the bridge after boot, and is the target of the
+             exact-alarm + onTaskRemoved restart so the service comes back on its own after
+             an OEM kill. exported=true ONLY for the system boot broadcasts. -->
+        <receiver
+            android:name=".RestartReceiver"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Transparent, no-UI activity that pops the system "Start screen capture?"
              consent (MediaProjection requires an Activity + a user tap; it can't be

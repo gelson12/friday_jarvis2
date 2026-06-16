@@ -1,10 +1,14 @@
 package com.jarvis.mobilebridge
 
 import android.Manifest
+import android.app.AlarmManager
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.os.Bundle
 import android.widget.Button
@@ -64,6 +68,12 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btn_connect).setOnClickListener {
             BridgeService.start(this)
+            // Self-revival: start the WorkManager watchdog + arm the alarm, and ask the
+            // OS to stop battery-killing us. On ColorOS this is the single biggest factor
+            // in the bridge staying alive overnight.
+            KeepAliveWorker.enqueue(this)
+            RestartReceiver.scheduleNext(this)
+            requestStayAlive()
             status.text = "Service starting — see the notification for live status."
         }
 
@@ -124,6 +134,55 @@ class MainActivity : AppCompatActivity() {
         // Auto-fire every permission prompt + the special-permission screens, then connect.
         requestNeededPermissions()
         BridgeService.start(this)
+    }
+
+    /**
+     * Ask the OS to stop killing us. Three one-tap prompts, each fail-soft:
+     *   1) Ignore battery optimisation (the standard Android whitelist).
+     *   2) Exact-alarm permission (Android 12+) so the ~1-min watchdog can fire in Doze.
+     *   3) Best-effort jump to the OEM "auto-launch / startup manager" screen — on
+     *      ColorOS/MIUI this is a SEPARATE list from battery optimisation and is the one
+     *      that actually stops the overnight kill. We can't toggle it for the user
+     *      (no API), but we open it so it's one tap, not a settings treasure-hunt.
+     */
+    private fun requestStayAlive() {
+        // 1) Battery optimisation whitelist.
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:$packageName"))
+                )
+            }
+        } catch (_: Exception) {}
+        // 2) Exact-alarm grant (Android 12+).
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val am = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+                if (am != null && !am.canScheduleExactAlarms()) {
+                    startActivity(
+                        Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                            .setData(Uri.parse("package:$packageName"))
+                    )
+                }
+            }
+        } catch (_: Exception) {}
+        // 3) OEM auto-launch / startup manager (best-effort; first one that resolves wins).
+        val oem = listOf(
+            ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+            ComponentName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"),
+            ComponentName("com.oplus.safecenter", "com.oplus.safecenter.startupapp.StartupAppListActivity"),
+            ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"),
+            ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+            ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+        )
+        for (c in oem) {
+            try {
+                startActivity(Intent().setComponent(c).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                break
+            } catch (_: Exception) {}
+        }
     }
 
     private fun requestNeededPermissions() {

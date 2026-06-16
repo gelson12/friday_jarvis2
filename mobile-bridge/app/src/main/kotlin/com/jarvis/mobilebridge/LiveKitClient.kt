@@ -32,6 +32,11 @@ class LiveKitClient(
     private var room: Room? = null
     private var lifecycleJob: Job? = null
     private val router = CommandRouter(ctx)
+    // True once the user has turned screen-share on, until they turn it off. While true we
+    // (a) skip the proactive 5-min refresh (it would tear the screen down) and (b) re-arm
+    // the screen track automatically after any reconnect — so the consent popup appears at
+    // most once (and zero times if the PROJECT_MEDIA app-op is granted via ADB).
+    @Volatile private var wantScreenShare = false
 
     fun start() {
         if (lifecycleJob != null) return
@@ -64,14 +69,23 @@ class LiveKitClient(
                 room = r
                 onStatus("Connected to Jarvis")
                 backoffMs = 1000L
+                // If a screen-share was running before this (re)connect, bring it straight
+                // back without bothering the user for another consent tap.
+                if (wantScreenShare) restoreScreenShare(r)
                 // Cellular carrier NAT silently kills an idle socket and the SDK doesn't
                 // always notice → the app shows "Connected" but the server dropped it (a
                 // zombie/half-open connection, so commands never arrive). keepAlive keeps
                 // the NAT mapping alive; the REFRESH ceiling proactively reconnects so a
-                // half-open can never linger more than a few minutes.
+                // half-open can never linger more than a few minutes — EXCEPT while
+                // screen-sharing, when a proactive reconnect would kill the screen track,
+                // so we then lean on keepAlive + event-driven reconnect instead.
                 val ka = scope.launch { keepAlive(r) }
                 try {
-                    withTimeoutOrNull(REFRESH_MS) { consumeEvents(r) }
+                    if (wantScreenShare) {
+                        consumeEvents(r)
+                    } else {
+                        withTimeoutOrNull(REFRESH_MS) { consumeEvents(r) }
+                    }
                 } finally {
                     ka.cancel()
                 }
@@ -127,6 +141,7 @@ class LiveKitClient(
                     // consent tap (Android security), so the first screen_on returns
                     // "requested" and the track goes live once the user approves.
                     "screen_on" -> try {
+                        wantScreenShare = true
                         val pend = ScreenShare.pending
                         if (pend != null) {
                             enableScreenShare(r, pend.second)
@@ -146,6 +161,7 @@ class LiveKitClient(
                         JSONObject().put("error", e.message ?: "screen share failed")
                     }
                     "screen_off" -> try {
+                        wantScreenShare = false
                         r.localParticipant.setScreenShareEnabled(false)
                         ScreenShare.pending = null
                         ScreenShare.onGranted = null
@@ -196,6 +212,24 @@ class LiveKitClient(
     private suspend fun enableScreenShare(r: Room, data: Intent) {
         BridgeService.setMediaProjection(ctx, true)
         r.localParticipant.setScreenShareEnabled(true, data)
+    }
+
+    /** After a reconnect, re-publish the screen track. Try the cached projection token
+     * first (no UI); if that's gone/rejected — Android 14 makes a token single-use — fall
+     * back to re-requesting, which is silent when the PROJECT_MEDIA app-op is granted and
+     * otherwise pops the consent once. */
+    private fun restoreScreenShare(r: Room) {
+        scope.launch {
+            val pend = ScreenShare.pending
+            if (pend != null) {
+                try { enableScreenShare(r, pend.second); return@launch }
+                catch (e: Exception) { Log.w(tag, "screen-share token reuse failed; re-requesting", e) }
+            }
+            ScreenShare.onGranted = { _, data ->
+                scope.launch { try { enableScreenShare(r, data) } catch (e: Exception) { Log.w(tag, "screen re-enable failed", e) } }
+            }
+            ScreenShare.request(ctx)
+        }
     }
 
     companion object {
