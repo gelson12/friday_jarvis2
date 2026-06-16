@@ -3696,10 +3696,15 @@ class Assistant(Agent):
         return False
 
     async def _maybe_handle_accommodation(self, text: str) -> bool:
+        # Book-the-X first — "Book the Barcelona Central Suite" contains
+        # no main-regex keyword (hotel/airbnb/stay), so requiring main-regex
+        # short-circuited the book flow entirely. Guarded by
+        # _accommodation_last_results so it only fires when there's a
+        # property list to match against.
+        if _ACCOMMODATION_BOOK_RE.search(text or "") and self._accommodation_last_results:
+            return await self._handle_accommodation_book_start(text)
         if not _ACCOMMODATION_RE.search(text or ""):
             return False
-        if _ACCOMMODATION_BOOK_RE.search(text) and self._accommodation_last_results:
-            return await self._handle_accommodation_book_start(text)
         return await self._handle_accommodation_search(text)
 
     async def _maybe_resume_accommodation_search(self, text: str) -> bool:

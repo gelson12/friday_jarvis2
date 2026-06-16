@@ -8,6 +8,12 @@ desktop-bridge/venv/
 .env
 *.env
 
+# Agent/Railway env dumps & deploy logs (contain live secrets) — never track
+.hermes_*
+.oj_*
+*_vars.txt
+*_vars_v2.txt
+
 # Local debug artifacts
 _intent_check.py
 

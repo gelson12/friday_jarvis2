@@ -1422,11 +1422,15 @@ def _cmd_phone_download_media(args: dict) -> dict:
     # Gather newest-first full paths per folder (toybox `ls -1t`), filter media in Python.
     candidates = []
     for folder in folders:
-        _, out = _adb_sh(serial, "sh", "-c", f"ls -1t '{folder}' 2>/dev/null | head -{count}", timeout=15)
+        # NB: call `ls` directly (NOT `sh -c "...|head"`) — adb shell + sh double-parse the
+        # args and `ls` ends up running with none (lists /). Filter + limit in Python.
+        _, out = _adb_sh(serial, "ls", "-1t", folder, timeout=15)
         for name in out.splitlines():
             name = name.strip()
             if name and name.lower().endswith(exts):
                 candidates.append(f"{folder}/{name}")
+                if len(candidates) >= count:
+                    break
         if len(candidates) >= count:
             break
     pulled = []
