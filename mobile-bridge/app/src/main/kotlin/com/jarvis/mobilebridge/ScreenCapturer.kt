@@ -36,11 +36,11 @@ class ScreenCapturer(
 
     fun start(resultCode: Int, data: Intent, maxW: Int = 480, fps: Int = 3) {
         val mpm = ctx.getSystemService(MediaProjectionManager::class.java)
+        // Android 14 ORDER: the mediaProjection FGS must be active BEFORE getMediaProjection
+        // (we already hold the user's consent, which authorises the FGS type).
+        BridgeService.setMediaProjection(ctx, true)
         val proj = mpm.getMediaProjection(resultCode, data)
             ?: throw IllegalStateException("getMediaProjection returned null")
-        // Android 14 ORDER: FGS must be mediaProjection-typed AFTER the projection is
-        // obtained and BEFORE the VirtualDisplay is created.
-        BridgeService.setMediaProjection(ctx, true)
         thread = HandlerThread("jarvis-screencap").apply { start() }
         handler = Handler(thread!!.looper)
         proj.registerCallback(object : MediaProjection.Callback() {

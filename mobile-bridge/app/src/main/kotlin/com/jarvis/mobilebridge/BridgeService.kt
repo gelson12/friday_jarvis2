@@ -87,8 +87,14 @@ class BridgeService : Service() {
         }
         val want = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or extraTypes
         for (t in intArrayOf(want, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)) {
-            try { ServiceCompat.startForeground(this, NOTIF_ID, notif, t); return }
-            catch (e: Exception) { android.util.Log.w("BridgeService", "startForeground($t) rejected", e) }
+            try {
+                ServiceCompat.startForeground(this, NOTIF_ID, notif, t)
+                if (extraTypes != 0) ScreenShare.log("FGS startForeground OK types=0x${t.toString(16)}")
+                return
+            } catch (e: Exception) {
+                if (extraTypes != 0) ScreenShare.log("FGS startForeground(0x${t.toString(16)}) rejected: ${e.javaClass.simpleName}: ${e.message}")
+                android.util.Log.w("BridgeService", "startForeground($t) rejected", e)
+            }
         }
         try { startForeground(NOTIF_ID, notif) } catch (_: Exception) {}
     }
