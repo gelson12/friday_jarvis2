@@ -1101,29 +1101,104 @@ def _adb_sh(serial: str, *cmd: str, timeout: int = 15) -> tuple[int, str]:
         return 1, str(exc)
 
 
+def _phone_locked(serial: str) -> bool | None:
+    """Is the keyguard showing (phone locked)? True/False, or None if undeterminable.
+    `mKeyguardShowing` (verified reliable on the CPH2637/Android 15) is primary;
+    `mDreamingLockscreen` is the fallback."""
+    _, out = _adb_sh(serial, "dumpsys", "activity", "activities")
+    m = re.search(r"mKeyguardShowing=(true|false)", out)
+    if m:
+        return m.group(1) == "true"
+    _, out2 = _adb_sh(serial, "dumpsys", "window")
+    m2 = re.search(r"mDreamingLockscreen=(true|false)", out2)
+    if m2:
+        return m2.group(1) == "true"
+    return None
+
+
 def _cmd_unlock_phone(args: dict) -> dict:
-    """Unlock the phone's PATTERN over ADB so the screen is usable (e.g. for screen-share).
-    A secure keyguard can't be bypassed by an app or the cloud — only a trusted ADB host.
-    We clear the credential using the KNOWN pattern (which authorises the change even while
-    locked), then wake + dismiss the now-swipe keyguard. The pattern is restored by
-    relock_phone, or immediately if restore=true is passed."""
+    """Ensure the phone is UNLOCKED over ADB (idempotent — safe to call before any phone
+    action). A secure keyguard can't be bypassed by an app or the cloud — only a trusted
+    ADB host. We wake, check the keyguard, and ONLY if it's actually locked do we clear the
+    credential with the KNOWN pattern (which authorises the change) + dismiss it. The
+    pattern is restored by relock_phone, or immediately if restore=true is passed."""
     pattern = str(args.get("pattern") or _DEFAULT_PATTERN).strip()
     serial = _adb_target(str(args.get("serial") or ""))
     if not serial:
         return {"error": "no phone reachable over ADB, sir — connect it by USB "
                          "(or set ADB_PHONE_ADDR=ip:port for wireless debugging)"}
-    _adb_sh(serial, "input", "keyevent", "224")  # wake
+    _adb_sh(serial, "input", "keyevent", "224")  # wake the screen
+    locked = _phone_locked(serial)
+    if locked is False:
+        return {"unlocked": True, "was_locked": False, "serial": serial}
     rc, out = _adb_sh(serial, "locksettings", "clear", "--old", pattern)
-    if rc != 0 and "success" not in out.lower():
+    lo = out.lower()
+    if rc != 0 and "success" not in lo and "no password" not in lo:
         return {"error": f"unlock failed: {out[:200]} — check USB-debugging is authorised "
-                         "and the pattern is correct"}
+                         "and the pattern is correct", "was_locked": True}
     _adb_sh(serial, "wm", "dismiss-keyguard")
     _adb_sh(serial, "input", "keyevent", "82")
     if str(args.get("restore", "")).lower() in ("1", "true", "yes"):
         _adb_sh(serial, "locksettings", "set-pattern", pattern)
-        return {"unlocked": True, "pattern_restored": True, "serial": serial}
-    return {"unlocked": True, "pattern_cleared": True, "serial": serial,
+        return {"unlocked": True, "was_locked": True, "pattern_restored": True, "serial": serial}
+    return {"unlocked": True, "was_locked": True, "pattern_cleared": True, "serial": serial,
             "note": "pattern temporarily off — say 're-lock my phone' to restore it"}
+
+
+def _cmd_approve_screen_capture(args: dict) -> dict:
+    """Tap the system MediaProjection consent ('Start now') over ADB so screen-share needs
+    NO physical interaction. The PROJECT_MEDIA app-op bypass is blocked on ColorOS, so we
+    auto-approve the dialog instead: poll the UI, prefer 'Entire screen', then tap Start.
+    Falls back to a bottom-right coordinate tap if the dialog can't be dumped."""
+    import time as _time
+    serial = _adb_target(str(args.get("serial") or ""))
+    if not serial:
+        return {"error": "no phone reachable over ADB"}
+
+    def _dump() -> str:
+        _adb_sh(serial, "uiautomator", "dump", "/sdcard/_jc.xml", timeout=12)
+        _, xml = _adb_sh(serial, "cat", "/sdcard/_jc.xml", timeout=10)
+        return xml
+
+    def _find(xml: str, pattern_txt: str):
+        for node in re.findall(r"<node\b[^>]*?/?>", xml):
+            tm = re.search(r'\btext="([^"]*)"', node)
+            cm = re.search(r'\bcontent-desc="([^"]*)"', node)
+            label = (tm.group(1) if tm else "") + " " + (cm.group(1) if cm else "")
+            if not label.strip():
+                continue
+            if re.search(pattern_txt, label, re.I) and "cancel" not in label.lower():
+                bm = re.search(r'\bbounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
+                if bm:
+                    x1, y1, x2, y2 = map(int, bm.groups())
+                    return (x1 + x2) // 2, (y1 + y2) // 2
+        return None
+
+    deadline = _time.time() + float(args.get("timeout", 8))
+    selected_screen = False
+    while _time.time() < deadline:
+        xml = _dump()
+        if not selected_screen:
+            # Android 14+ defaults to 'Single app'; pick whole screen if offered.
+            es = _find(xml, r"entire screen|whole screen")
+            if es:
+                _adb_sh(serial, "input", "tap", str(es[0]), str(es[1]))
+                selected_screen = True
+                _time.sleep(0.5)
+                continue
+        btn = _find(xml, r"\bstart now\b|\bstart recording\b|\bstart\b|\ballow\b")
+        if btn:
+            _adb_sh(serial, "input", "tap", str(btn[0]), str(btn[1]))
+            return {"approved": True, "tapped": list(btn), "selected_entire_screen": selected_screen}
+        _time.sleep(0.6)
+    # Fallback: tap the usual bottom-right "Start" position (proportional to screen size).
+    _, sz = _adb_sh(serial, "wm", "size")
+    m = re.search(r"(\d+)x(\d+)", sz)
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+        _adb_sh(serial, "input", "tap", str(int(w * 0.85)), str(int(h * 0.92)))
+        return {"approved": "fallback", "tapped": [int(w * 0.85), int(h * 0.92)]}
+    return {"approved": False, "error": "consent dialog not found"}
 
 
 def _cmd_relock_phone(args: dict) -> dict:
@@ -1147,6 +1222,220 @@ def _cmd_grant_screen_capture(args: dict) -> dict:
     _adb_sh(serial, "appops", "set", pkg, "PROJECT_MEDIA", "allow")
     _, chk = _adb_sh(serial, "appops", "get", pkg, "PROJECT_MEDIA")
     return {"granted": "allow" in chk.lower(), "serial": serial, "detail": chk[:200]}
+
+
+# ── FULLY-AUTOMATED phone screen mirror (laptop captures over ADB → LiveKit track) ──
+# The phone's in-app MediaProjection needs a consent tap that can't be automated on
+# ColorOS. ADB-level `screencap`, however, captures the screen with NO consent — so the
+# laptop grabs frames over ADB and publishes them as a video track to the room. Zero taps.
+_ROOM = None          # set in _run_once once connected
+_LOOP = None          # the bridge's asyncio loop, for scheduling from handler threads
+_screen_state = {"stop": True, "publishing": False}
+
+
+def _screencap_raw(serial: str) -> bytes:
+    adb = _adb_path()
+    if not adb:
+        return b""
+    args = [adb] + (["-s", serial] if serial else []) + ["exec-out", "screencap"]
+    try:
+        return subprocess.run(args, capture_output=True, timeout=15).stdout
+    except Exception:  # noqa: BLE001
+        return b""
+
+
+def _parse_screencap(data: bytes):
+    """Android screencap raw = w,h,format[,colorspace] (uint32 LE) header + RGBA8888."""
+    if len(data) < 16:
+        return None
+    w = int.from_bytes(data[0:4], "little")
+    h = int.from_bytes(data[4:8], "little")
+    if w <= 0 or h <= 0 or w > 8000 or h > 8000:
+        return None
+    hdr = 16 if len(data) >= 16 + w * h * 4 else 12
+    px = data[hdr:hdr + w * h * 4]
+    if len(px) < w * h * 4:
+        return None
+    return w, h, px
+
+
+async def _screen_loop(serial: str, fps: int, max_w: int) -> None:
+    import numpy as np
+    from livekit import rtc
+    first = await asyncio.to_thread(_screencap_raw, serial)
+    parsed = _parse_screencap(first)
+    if not parsed:
+        logger.error("screen mirror: first screencap failed")
+        _screen_state["publishing"] = False
+        return
+    w, h, _ = parsed
+    scale = min(1.0, max_w / float(w))
+    ow = max(2, int(w * scale) // 2 * 2)
+    oh = max(2, int(h * scale) // 2 * 2)
+    ys = np.linspace(0, h - 1, oh).astype(int)
+    xs = np.linspace(0, w - 1, ow).astype(int)
+    source = rtc.VideoSource(ow, oh)
+    track = rtc.LocalVideoTrack.create_video_track("phone-screen", source)
+    await _ROOM.local_participant.publish_track(
+        track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_SCREENSHARE))
+    logger.info("screen mirror publishing %dx%d @ %dfps", ow, oh, fps)
+    _screen_state["publishing"] = True
+    interval = 1.0 / max(1, fps)
+    try:
+        while not _screen_state["stop"]:
+            data = await asyncio.to_thread(_screencap_raw, serial)
+            p = _parse_screencap(data)
+            if p:
+                cw, ch, px = p
+                arr = np.frombuffer(px, dtype=np.uint8).reshape(ch, cw, 4)
+                if (cw, ch) != (ow, oh):
+                    arr = arr[ys][:, xs]
+                frame = rtc.VideoFrame(ow, oh, rtc.VideoBufferType.RGBA, arr.tobytes())
+                source.capture_frame(frame)
+            await asyncio.sleep(interval)
+    finally:
+        try:
+            await _ROOM.local_participant.unpublish_track(track.sid)
+        except Exception:  # noqa: BLE001
+            pass
+        _screen_state["publishing"] = False
+        logger.info("screen mirror stopped")
+
+
+def _adb_screen_serial() -> str | None:
+    """Pick the best transport for the big raw screencap frames: a USB device (fast)
+    over a wireless one (a 10MB/frame raw capture times out over Wi-Fi)."""
+    adb = _adb_path()
+    if not adb:
+        return None
+    try:
+        p = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10)
+        devs = [ln.split("\t")[0] for ln in p.stdout.splitlines()[1:] if "\tdevice" in ln]
+        usb = [d for d in devs if ":" not in d]
+        return usb[0] if usb else (devs[0] if devs else None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _cmd_phone_screen_start(args: dict) -> dict:
+    """Start mirroring the phone screen to the dashboard over ADB — no consent, no tap.
+    Prefers USB (fast); falls back to whatever ADB device is present."""
+    serial = str(args.get("serial") or "") or _adb_screen_serial() or _adb_target("")
+    if not serial:
+        return {"error": "no phone reachable over ADB"}
+    if _LOOP is None or _ROOM is None:
+        return {"error": "bridge not connected to the room yet"}
+    if _screen_state.get("publishing"):
+        return {"phone_screen": "already streaming", "serial": serial}
+    _screen_state["stop"] = False
+    asyncio.run_coroutine_threadsafe(
+        _screen_loop(serial, int(args.get("fps", 4) or 4), int(args.get("max_w", 540) or 540)),
+        _LOOP,
+    )
+    return {"phone_screen": "streaming", "serial": serial}
+
+
+def _cmd_phone_screen_stop(args: dict) -> dict:
+    _screen_state["stop"] = True
+    return {"phone_screen": "stopping"}
+
+
+# ── Remote CONTROL of the mirrored screen (click/scroll the dashboard → ADB input) ──
+_PHONE_WH: dict = {}
+
+
+def _phone_wh(serial: str):
+    if serial in _PHONE_WH:
+        return _PHONE_WH[serial]
+    _, out = _adb_sh(serial, "wm", "size")
+    m = re.search(r"Override size:\s*(\d+)x(\d+)", out) or re.search(r"(\d+)x(\d+)", out)
+    wh = (int(m.group(1)), int(m.group(2))) if m else (1080, 2400)
+    _PHONE_WH[serial] = wh
+    return wh
+
+
+def _cmd_phone_tap(args: dict) -> dict:
+    """Tap the phone at normalised coords (nx,ny in 0..1) — maps a dashboard click."""
+    serial = _adb_screen_serial() or _adb_target("")
+    if not serial:
+        return {"error": "no phone over ADB"}
+    w, h = _phone_wh(serial)
+    x = int(max(0.0, min(1.0, float(args.get("nx", 0.5)))) * w)
+    y = int(max(0.0, min(1.0, float(args.get("ny", 0.5)))) * h)
+    _adb_sh(serial, "input", "tap", str(x), str(y))
+    return {"tapped": [x, y]}
+
+
+def _cmd_phone_swipe(args: dict) -> dict:
+    """Swipe/scroll the phone between two normalised points (drag on the dashboard)."""
+    serial = _adb_screen_serial() or _adb_target("")
+    if not serial:
+        return {"error": "no phone over ADB"}
+    w, h = _phone_wh(serial)
+    x1 = int(max(0.0, min(1.0, float(args.get("nx1", 0.5)))) * w)
+    y1 = int(max(0.0, min(1.0, float(args.get("ny1", 0.5)))) * h)
+    x2 = int(max(0.0, min(1.0, float(args.get("nx2", 0.5)))) * w)
+    y2 = int(max(0.0, min(1.0, float(args.get("ny2", 0.5)))) * h)
+    dur = int(args.get("ms", 180))
+    _adb_sh(serial, "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(dur))
+    return {"swiped": [x1, y1, x2, y2]}
+
+
+def _cmd_phone_key(args: dict) -> dict:
+    """Navigation keys for the mirrored phone: back / home / recents / power."""
+    serial = _adb_screen_serial() or _adb_target("")
+    code = {"back": "4", "home": "3", "recents": "187", "power": "26",
+            "enter": "66", "volup": "24", "voldown": "25"}.get(str(args.get("key", "")).lower())
+    if not serial or not code:
+        return {"error": "no phone over ADB or bad key"}
+    _adb_sh(serial, "input", "keyevent", code)
+    return {"key": args.get("key")}
+
+
+def _cmd_phone_text(args: dict) -> dict:
+    """Type text into the focused field on the mirrored phone."""
+    serial = _adb_screen_serial() or _adb_target("")
+    txt = str(args.get("text", ""))
+    if not serial or not txt:
+        return {"error": "no phone over ADB or empty text"}
+    _adb_sh(serial, "input", "text", txt.replace(" ", "%s"))
+    return {"typed": txt[:40]}
+
+
+def _cmd_phone_download_media(args: dict) -> dict:
+    """Pull the most recent photos/videos off the phone to the laptop's Downloads\\PhoneMedia
+    over ADB (no consent needed). count = how many of the newest items."""
+    adb = _adb_path()
+    serial = _adb_screen_serial() or _adb_target("")
+    if not adb or not serial:
+        return {"error": "no phone over ADB"}
+    base = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    dest = os.path.join(base, "Downloads", "PhoneMedia")
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"can't create {dest}: {exc}"}
+    count = max(1, min(50, int(args.get("count", 10) or 10)))
+    # Newest files first across the usual media folders (toybox ls -t).
+    dirs = "/sdcard/DCIM/Camera /sdcard/Pictures /sdcard/Download /sdcard/Movies"
+    _, out = _adb_sh(serial, "sh", "-c",
+                     f"ls -1t {dirs} 2>/dev/null | grep -iE '\\.(jpg|jpeg|png|gif|mp4|mov|webp)$' | head -{count}",
+                     timeout=20)
+    # ls of multiple dirs gives bare filenames; re-resolve full paths by searching each dir.
+    names = [n.strip() for n in out.splitlines() if n.strip()]
+    pulled = []
+    for name in names[:count]:
+        for folder in ("/sdcard/DCIM/Camera", "/sdcard/Pictures", "/sdcard/Download", "/sdcard/Movies"):
+            src = f"{folder}/{name}"
+            try:
+                r = subprocess.run([adb, "-s", serial, "pull", src, dest],
+                                   capture_output=True, text=True, timeout=120)
+                if r.returncode == 0 and "pulled" in (r.stdout + r.stderr).lower():
+                    pulled.append(name)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+    return {"downloaded": len(pulled), "dest": dest, "files": pulled[:10]}
 
 
 _HANDLERS = {
@@ -1183,6 +1472,16 @@ _HANDLERS = {
     "unlock_phone": _cmd_unlock_phone,
     "relock_phone": _cmd_relock_phone,
     "grant_screen_capture": _cmd_grant_screen_capture,
+    "approve_screen_capture": _cmd_approve_screen_capture,
+    # Fully-automated phone screen mirror (laptop captures over ADB, no consent/tap).
+    "phone_screen_start": _cmd_phone_screen_start,
+    "phone_screen_stop": _cmd_phone_screen_stop,
+    # Remote control of the mirror — dashboard click/scroll/keys -> ADB input.
+    "phone_tap": _cmd_phone_tap,
+    "phone_swipe": _cmd_phone_swipe,
+    "phone_key": _cmd_phone_key,
+    "phone_text": _cmd_phone_text,
+    "phone_download_media": _cmd_phone_download_media,
 }
 
 
@@ -1305,6 +1604,11 @@ async def _run_once() -> None:
         asyncio.create_task(_handle(room, packet))
 
     await room.connect(url, token)
+    # Expose the room + loop so handlers (which run in a worker thread) can publish the
+    # phone-screen video track via run_coroutine_threadsafe.
+    global _ROOM, _LOOP
+    _ROOM = room
+    _LOOP = asyncio.get_running_loop()
     logger.info(
         "connected to room '%s' as desktop-bridge-%s (shell=%s)",
         CONTROL_ROOM,
