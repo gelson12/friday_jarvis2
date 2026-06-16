@@ -160,6 +160,7 @@ class LiveKitClient(
                                         JSONObject().put("screen", "on")
                                     } catch (e: Exception) {
                                         Log.w(tag, "screen share enable failed", e)
+                                        ScreenShare.log("enableScreenShare FAILED: ${e.message ?: e.toString()}")
                                         JSONObject().put("screen", "error")
                                             .put("detail", (e.message ?: e.toString()).take(400))
                                     }
@@ -255,8 +256,11 @@ class LiveKitClient(
     /** Promote the foreground service to the mediaProjection type (Android 14
      * needs this active BEFORE capture starts), then publish the screen track. */
     private suspend fun enableScreenShare(r: Room, data: Intent) {
+        ScreenShare.log("enableScreenShare: promoting FGS to mediaProjection")
         BridgeService.setMediaProjection(ctx, true)
+        ScreenShare.log("enableScreenShare: calling setScreenShareEnabled")
         r.localParticipant.setScreenShareEnabled(true, data)
+        ScreenShare.log("enableScreenShare: setScreenShareEnabled returned OK")
     }
 
     /** After a reconnect, re-publish the screen track. Try the cached projection token
