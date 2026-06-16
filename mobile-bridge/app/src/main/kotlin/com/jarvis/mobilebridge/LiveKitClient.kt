@@ -37,6 +37,8 @@ class LiveKitClient(
     // the screen track automatically after any reconnect — so the consent popup appears at
     // most once (and zero times if the PROJECT_MEDIA app-op is granted via ADB).
     @Volatile private var wantScreenShare = false
+    private var screenCapturer: ScreenCapturer? = null
+    @Volatile private var screenRoom: Room? = null  // current publish target for screen frames
 
     fun start() {
         if (lifecycleJob != null) return
@@ -150,13 +152,13 @@ class LiveKitClient(
                         wantScreenShare = true
                         val pend = ScreenShare.pending
                         if (pend != null) {
-                            enableScreenShare(r, pend.second)
+                            enableScreenShare(r, pend.first, pend.second)
                             JSONObject().put("screen", "on")
                         } else {
-                            ScreenShare.onGranted = { _, data ->
+                            ScreenShare.onGranted = { rc, data ->
                                 scope.launch {
                                     val sres = try {
-                                        enableScreenShare(r, data)
+                                        enableScreenShare(r, rc, data)
                                         JSONObject().put("screen", "on")
                                     } catch (e: Exception) {
                                         Log.w(tag, "screen share enable failed", e)
@@ -186,10 +188,10 @@ class LiveKitClient(
                     }
                     "screen_off" -> try {
                         wantScreenShare = false
-                        r.localParticipant.setScreenShareEnabled(false)
+                        try { screenCapturer?.stop() } catch (_: Exception) {}
+                        screenCapturer = null
                         ScreenShare.pending = null
                         ScreenShare.onGranted = null
-                        BridgeService.setMediaProjection(ctx, false)
                         JSONObject().put("screen", "off")
                     } catch (e: Exception) {
                         JSONObject().put("error", e.message ?: "screen stop failed")
@@ -253,38 +255,48 @@ class LiveKitClient(
         }
     }
 
-    /** Promote the foreground service to the mediaProjection type (Android 14
-     * needs this active BEFORE capture starts), then publish the screen track. */
-    private suspend fun enableScreenShare(r: Room, data: Intent) {
-        ScreenShare.log("enableScreenShare: promoting FGS to mediaProjection")
-        BridgeService.setMediaProjection(ctx, true)
-        ScreenShare.log("enableScreenShare: calling setScreenShareEnabled")
-        r.localParticipant.setScreenShareEnabled(true, data)
-        ScreenShare.log("enableScreenShare: setScreenShareEnabled returned OK")
+    /** Custom MediaProjection capturer (NOT the SDK's setScreenShareEnabled, which can't
+     * satisfy Android 14's FGS ordering). Captures the screen + publishes JPEG frames on
+     * the data channel for the dashboard to render. Frames go to `screenRoom` so a reconnect
+     * can re-point them without re-prompting for consent. */
+    private fun enableScreenShare(r: Room, resultCode: Int, data: Intent) {
+        ScreenShare.log("custom capturer: starting (rc=$resultCode)")
+        screenRoom = r
+        try { screenCapturer?.stop() } catch (_: Exception) {}
+        val cap = ScreenCapturer(ctx) { jpeg ->
+            val rr = screenRoom ?: return@ScreenCapturer
+            scope.launch {
+                try {
+                    rr.localParticipant.publishData(
+                        jpeg, reliability = DataPublishReliability.RELIABLE, topic = TOPIC_SCREEN_FRAME)
+                } catch (_: Exception) {}
+            }
+        }
+        cap.start(resultCode, data, maxW = 460, fps = 3)
+        screenCapturer = cap
+        ScreenShare.log("custom capturer: virtual display up, streaming frames")
     }
 
-    /** After a reconnect, re-publish the screen track. Try the cached projection token
-     * first (no UI); if that's gone/rejected — Android 14 makes a token single-use — fall
-     * back to re-requesting, which is silent when the PROJECT_MEDIA app-op is granted and
-     * otherwise pops the consent once. */
+    /** After a reconnect: if the custom capturer is still running (MediaProjection survives
+     * a LiveKit reconnect), just RE-POINT the frames to the new room — no re-consent. Only
+     * if it's not running do we re-request. */
     private fun restoreScreenShare(r: Room) {
-        scope.launch {
-            val pend = ScreenShare.pending
-            if (pend != null) {
-                try { enableScreenShare(r, pend.second); return@launch }
-                catch (e: Exception) { Log.w(tag, "screen-share token reuse failed; re-requesting", e) }
-            }
-            ScreenShare.onGranted = { _, data ->
-                scope.launch { try { enableScreenShare(r, data) } catch (e: Exception) { Log.w(tag, "screen re-enable failed", e) } }
-            }
-            ScreenShare.request(ctx)
+        if (screenCapturer?.running == true) {
+            screenRoom = r
+            ScreenShare.log("reconnect: re-pointed screen frames to the new room")
+            return
         }
+        ScreenShare.onGranted = { rc, data ->
+            scope.launch { try { enableScreenShare(r, rc, data) } catch (e: Exception) { Log.w(tag, "screen re-enable failed", e) } }
+        }
+        ScreenShare.request(ctx)
     }
 
     companion object {
         const val TOPIC_CMD = "mobile-cmd"
         const val TOPIC_RESULT = "mobile-result"
         const val TOPIC_KEEPALIVE = "keepalive"
+        const val TOPIC_SCREEN_FRAME = "phone-frame"  // JPEG frames from the app-only capturer
         const val KEEPALIVE_MS = 15_000L        // < typical carrier NAT idle timeout
         const val REFRESH_MS = 5 * 60_000L      // proactively reconnect every 5 min
         private val KEEPALIVE_PAYLOAD = "ka".toByteArray(Charsets.UTF_8)
