@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Remote-control accessibility service: gesture injection (taps/swipes) onto any app
-     so the dashboard can drive the phone with no laptop/ADB. canPerformGestures is the
-     key flag that enables dispatchGesture. -->
+     so the dashboard can drive the phone with no laptop/ADB. canPerformGestures enables
+     dispatchGesture; canRetrieveWindowContent + the content-changed event let it auto-accept
+     the MediaProjection "Start now" consent so the no-laptop screen share is zero-touch. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canPerformGestures="true"
-    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="true"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:notificationTimeout="100" />
