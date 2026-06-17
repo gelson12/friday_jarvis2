@@ -1,6 +1,7 @@
 package com.jarvis.mobilebridge
 
 import android.content.Context
+import android.app.KeyguardManager
 import android.content.Intent
 import android.util.Log
 import io.livekit.android.LiveKit
@@ -217,6 +218,43 @@ class LiveKitClient(
                         val svc = ControlAccessibilityService.instance
                         if (svc == null) JSONObject().put("error", "enable Jarvis under Settings → Accessibility, sir")
                         else JSONObject().put("key", svc.globalKey(args.optString("key")))
+                    }
+                    // NON-DESTRUCTIVE unlock: wake the screen, surface the secure pattern
+                    // bouncer, then DRAW the owner's pattern via the accessibility service —
+                    // exactly as they would. The stored pattern is NEVER changed or cleared.
+                    // The dashboard/worker sends this before any command when the phone is locked.
+                    "unlock_pattern", "keyguard_unlock" -> try {
+                        val km = ctx.getSystemService(KeyguardManager::class.java)
+                        val lockedBefore = km?.isKeyguardLocked == true
+                        when {
+                            !lockedBefore ->
+                                JSONObject().put("unlocked", true).put("was_locked", false)
+                            ControlAccessibilityService.instance == null ->
+                                JSONObject().put("error", "enable Jarvis under Settings → Accessibility, sir")
+                                    .put("was_locked", true)
+                            else -> {
+                                val svc = ControlAccessibilityService.instance!!
+                                // Wake + ask the keyguard to show its credential bouncer.
+                                try {
+                                    ctx.startActivity(
+                                        Intent(ctx, WakeActivity::class.java)
+                                            .putExtra("dismiss", true)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                } catch (_: Exception) {}
+                                delay(1200)
+                                val grid = if (args.has("grid_l"))
+                                    doubleArrayOf(args.optDouble("grid_l"), args.optDouble("grid_t"),
+                                        args.optDouble("grid_r"), args.optDouble("grid_b")) else null
+                                val drew = svc.drawPattern(args.optString("pattern"), grid)
+                                delay(900)
+                                val lockedAfter = km?.isKeyguardLocked == true
+                                JSONObject().put("unlocked", !lockedAfter).put("was_locked", true)
+                                    .put("drew", drew).put("secure", km?.isDeviceSecure == true)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        JSONObject().put("error", e.message ?: "unlock failed")
                     }
                     else -> router.execute(cmd, args)
                 }
