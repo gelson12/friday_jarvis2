@@ -1164,12 +1164,15 @@ def _cmd_unlock_phone(args: dict) -> dict:
         return {"unlocked": True, "was_locked": False, "serial": serial}
     # Reveal the lock UI (this alone dismisses a NON-secure swipe lock; for a secure
     # keyguard it brings up the pattern bouncer). Then re-check.
-    path, reveal = _load_unlock_path()
-    rev = reveal or [540, 1900, 540, 700, 200]
-    _adb_sh(serial, "input", "swipe", *[str(int(v)) for v in rev])
-    time.sleep(1.0)
+    path, _reveal = _load_unlock_path()
+    # Reveal the credential bouncer WITHOUT swiping through the notification column — a swipe
+    # there drags a notification (e.g. TikTok) instead of revealing the pattern grid.
+    # `wm dismiss-keyguard` brings up the secure bouncer directly and fully dismisses a
+    # non-secure swipe lock.
+    _adb_sh(serial, "wm", "dismiss-keyguard")
+    time.sleep(1.2)
     if _phone_locked(serial) is False:
-        return {"unlocked": True, "was_locked": True, "serial": serial, "method": "swipe"}
+        return {"unlocked": True, "was_locked": True, "serial": serial, "method": "dismiss"}
     # Secure keyguard: DRAW the recorded pattern (never clear it).
     if not path:
         return {"unlocked": False, "was_locked": True, "serial": serial, "secure": True,
