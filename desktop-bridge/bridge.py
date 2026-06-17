@@ -1182,11 +1182,21 @@ def _cmd_unlock_phone(args: dict) -> dict:
         + [f"input motionevent MOVE {int(x)} {int(y)}" for x, y in path[1:]]
         + [f"input motionevent UP {int(path[-1][0])} {int(path[-1][1])}"]
     )
-    _adb_sh(serial, chain, timeout=30)
-    time.sleep(1.3)
-    ok = _phone_locked(serial) is False
-    return {"unlocked": ok, "was_locked": True, "serial": serial, "secure": True,
-            "method": "pattern-draw"}
+    # The reveal/draw is occasionally flaky (the bouncer hadn't fully rendered, or a stray
+    # touch over wireless), so retry a few times — re-revealing the bouncer each pass.
+    for attempt in range(3):
+        _adb_sh(serial, chain, timeout=30)
+        time.sleep(1.3)
+        if _phone_locked(serial) is False:
+            return {"unlocked": True, "was_locked": True, "serial": serial, "secure": True,
+                    "method": "pattern-draw", "attempts": attempt + 1}
+        # Re-arm: wake + re-reveal the bouncer before the next draw.
+        _adb_sh(serial, "input", "keyevent", "224")
+        _adb_sh(serial, "wm", "dismiss-keyguard")
+        time.sleep(1.0)
+    return {"unlocked": False, "was_locked": True, "serial": serial, "secure": True,
+            "method": "pattern-draw", "attempts": 3,
+            "note": "drew the pattern but the keyguard didn't clear — retry, or re-record the path"}
 
 
 def _cmd_approve_screen_capture(args: dict) -> dict:
