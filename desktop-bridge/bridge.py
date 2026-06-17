@@ -1069,10 +1069,20 @@ def _adb_path() -> str | None:
 
 def _adb_target(serial: str = "") -> str | None:
     """Resolve which phone to drive: an explicit serial/ip:port, the ADB_PHONE_ADDR env
-    (wireless), or the single attached USB device. Auto-`connect`s wireless addresses."""
+    (wireless), or the single attached USB device. Auto-`connect`s wireless addresses AND
+    verifies the candidate is actually online — a STALE wireless IP (the hotspot address
+    changes between sessions) falls back to the USB device instead of failing silently."""
     adb = _adb_path()
     if not adb:
         return None
+
+    def _online() -> list[str]:
+        try:
+            p = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10)
+            return [ln.split("\t")[0] for ln in p.stdout.splitlines()[1:] if "\tdevice" in ln]
+        except Exception:  # noqa: BLE001
+            return []
+
     cand = serial or os.environ.get("ADB_PHONE_ADDR", "").strip()
     if cand:
         if ":" in cand:
@@ -1080,13 +1090,11 @@ def _adb_target(serial: str = "") -> str | None:
                 subprocess.run([adb, "connect", cand], capture_output=True, timeout=10)
             except Exception:  # noqa: BLE001
                 pass
-        return cand
-    try:
-        p = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10)
-        devs = [ln.split("\t")[0] for ln in p.stdout.splitlines()[1:] if "\tdevice" in ln]
-        return devs[0] if devs else None
-    except Exception:  # noqa: BLE001
-        return None
+        if cand in _online():
+            return cand
+        # Stale wireless address — fall through to whatever USB device is attached.
+    devs = _online()
+    return devs[0] if devs else (cand or None)
 
 
 def _adb_sh(serial: str, *cmd: str, timeout: int = 15) -> tuple[int, str]:
@@ -1116,13 +1124,36 @@ def _phone_locked(serial: str) -> bool | None:
     return None
 
 
+def _load_unlock_path() -> tuple[list, list]:
+    """Load the recorded unlock-pattern touch path (display coords) + the reveal swipe.
+    Stored OUTSIDE git (sensitive — reveals the pattern) at PHONE_UNLOCK_PATH or
+    `unlock_path.json` next to this file. Returns (path_points, reveal_swipe) or ([], [])."""
+    cands = []
+    envp = os.environ.get("PHONE_UNLOCK_PATH", "").strip()
+    if envp:
+        cands.append(envp)
+    cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "unlock_path.json"))
+    for c in cands:
+        try:
+            if c and os.path.exists(c):
+                d = json.load(open(c, encoding="utf-8"))
+                pts = d.get("path") if isinstance(d, dict) else d
+                rev = d.get("reveal_swipe") if isinstance(d, dict) else None
+                if pts and len(pts) >= 3:
+                    return pts, (rev or [540, 1900, 540, 700, 200])
+        except Exception:  # noqa: BLE001
+            pass
+    return [], []
+
+
 def _cmd_unlock_phone(args: dict) -> dict:
-    """Ensure the phone is UNLOCKED over ADB (idempotent — safe to call before any phone
-    action). A secure keyguard can't be bypassed by an app or the cloud — only a trusted
-    ADB host. We wake, check the keyguard, and ONLY if it's actually locked do we clear the
-    credential with the KNOWN pattern (which authorises the change) + dismiss it. The
-    pattern is restored by relock_phone, or immediately if restore=true is passed."""
-    pattern = str(args.get("pattern") or _DEFAULT_PATTERN).strip()
+    """NON-DESTRUCTIVE unlock over ADB: we ENTER the owner's pattern exactly as they would
+    and NEVER clear or change the stored credential. A non-secure (swipe/Smart-Lock) keyguard
+    is dismissed; a secure pattern is DRAWN by replaying a recorded touch path via chained
+    `input motionevent` (one continuous gesture — sendevent is blocked for shell on ColorOS).
+    The path is recorded once from the owner's real unlock (see _load_unlock_path).
+    (Earlier builds ran `locksettings clear` here — that REMOVED the lock and was wrong.)"""
+    import time
     serial = _adb_target(str(args.get("serial") or ""))
     if not serial:
         return {"error": "no phone reachable over ADB, sir — connect it by USB "
@@ -1131,18 +1162,28 @@ def _cmd_unlock_phone(args: dict) -> dict:
     locked = _phone_locked(serial)
     if locked is False:
         return {"unlocked": True, "was_locked": False, "serial": serial}
-    rc, out = _adb_sh(serial, "locksettings", "clear", "--old", pattern)
-    lo = out.lower()
-    if rc != 0 and "success" not in lo and "no password" not in lo:
-        return {"error": f"unlock failed: {out[:200]} — check USB-debugging is authorised "
-                         "and the pattern is correct", "was_locked": True}
-    _adb_sh(serial, "wm", "dismiss-keyguard")
-    _adb_sh(serial, "input", "keyevent", "82")
-    if str(args.get("restore", "")).lower() in ("1", "true", "yes"):
-        _adb_sh(serial, "locksettings", "set-pattern", pattern)
-        return {"unlocked": True, "was_locked": True, "pattern_restored": True, "serial": serial}
-    return {"unlocked": True, "was_locked": True, "pattern_cleared": True, "serial": serial,
-            "note": "pattern temporarily off — say 're-lock my phone' to restore it"}
+    # Reveal the lock UI (this alone dismisses a NON-secure swipe lock; for a secure
+    # keyguard it brings up the pattern bouncer). Then re-check.
+    path, reveal = _load_unlock_path()
+    rev = reveal or [540, 1900, 540, 700, 200]
+    _adb_sh(serial, "input", "swipe", *[str(int(v)) for v in rev])
+    time.sleep(1.0)
+    if _phone_locked(serial) is False:
+        return {"unlocked": True, "was_locked": True, "serial": serial, "method": "swipe"}
+    # Secure keyguard: DRAW the recorded pattern (never clear it).
+    if not path:
+        return {"unlocked": False, "was_locked": True, "serial": serial, "secure": True,
+                "note": "no unlock pattern recorded — run the one-time getevent calibration"}
+    chain = " ; ".join(
+        [f"input motionevent DOWN {int(path[0][0])} {int(path[0][1])}"]
+        + [f"input motionevent MOVE {int(x)} {int(y)}" for x, y in path[1:]]
+        + [f"input motionevent UP {int(path[-1][0])} {int(path[-1][1])}"]
+    )
+    _adb_sh(serial, chain, timeout=30)
+    time.sleep(1.3)
+    ok = _phone_locked(serial) is False
+    return {"unlocked": ok, "was_locked": True, "serial": serial, "secure": True,
+            "method": "pattern-draw"}
 
 
 def _cmd_approve_screen_capture(args: dict) -> dict:
