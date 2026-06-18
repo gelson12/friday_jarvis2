@@ -187,7 +187,8 @@ def _cmd_open(args: dict) -> dict:
         except Exception as exc2:  # noqa: BLE001
             return {"error": f"{exc}; {exc2}"}
     time.sleep(0.7)
-    _bring_to_front(target)
+    # A folder opens in Explorer, so foreground the explorer window (not the folder name).
+    _bring_to_front("explorer" if os.path.isdir(target) else target)
     return {"opened": target}
 
 
