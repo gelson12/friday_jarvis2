@@ -244,6 +244,36 @@ def _cmd_make_dir(args: dict) -> dict:
         return {"error": str(exc)}
 
 
+def _cmd_new_file(args: dict) -> dict:
+    """Create an (empty) file. Either an explicit ``path``, or a ``name`` inside a spoken
+    ``parent`` folder (default the Desktop). Defaults to 'New Text Document.txt' and adds
+    a .txt extension when none is given; never clobbers an existing file."""
+    name = (args.get("name") or "").strip().strip('"').strip("'")
+    if not name:
+        name = "New Text Document.txt"
+    if "." not in os.path.basename(name):
+        name += ".txt"
+    if args.get("path"):
+        path = _resolve_dir(args.get("path"))
+    else:
+        parent = _resolve_dir(args.get("parent") or "desktop")
+        path = os.path.join(parent, name)
+    try:
+        parent_dir = os.path.dirname(path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        if os.path.exists(path):
+            base, ext = os.path.splitext(path)
+            i = 2
+            while os.path.exists(f"{base} ({i}){ext}"):
+                i += 1
+            path = f"{base} ({i}){ext}"
+        open(path, "a", encoding="utf-8").close()
+        return {"path": path, "created": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 def _cmd_volume(args: dict) -> dict:
     """Adjust the system master volume.
 
@@ -1579,6 +1609,7 @@ _HANDLERS = {
     "read_file": _cmd_read_file,
     "write_file": _cmd_write_file,
     "make_dir": _cmd_make_dir,
+    "new_file": _cmd_new_file,
     "volume": _cmd_volume,
     "audio_sessions": _cmd_audio_sessions,
     "app_volume": _cmd_app_volume,
