@@ -99,8 +99,79 @@ def _cmd_shell(args: dict) -> dict:
         return {"error": "timed out"}
 
 
+_FG_ALIASES = {
+    "command": "cmd", "command prompt": "cmd", "cmd": "cmd", "terminal": "cmd",
+    "powershell": "powershell", "notepad": "notepad", "explorer": "explorer",
+    "files": "explorer", "calc": "calc", "calculator": "calc",
+}
+
+
+def _foreground_images(target: str) -> set:
+    base = os.path.splitext(os.path.basename(str(target).strip().strip('"')))[0].lower()
+    return {x for x in {_FG_ALIASES.get(base, base)} if x}
+
+
+def _bring_to_front(target: str) -> None:
+    """Apps launched by a background process open BEHIND the current window (Windows'
+    foreground lock stops a background app pulling a window to the front), so the owner
+    never sees them. Drop the lock timeout and force the matching window to the foreground.
+    Best-effort + fail-soft (Windows only)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        try:
+            user32.SystemParametersInfoW(0x2001, 0, 0, 0)  # SPI_SETFOREGROUNDLOCKTIMEOUT=0
+        except Exception:  # noqa: BLE001
+            pass
+        images = _foreground_images(target)
+        if not images:
+            return
+        found: list[int] = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _cb(hwnd, _lp):
+            try:
+                if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) == 0:
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+                if not h:
+                    return True
+                buf = ctypes.create_unicode_buffer(512)
+                sz = wintypes.DWORD(512)
+                ok = kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(sz))
+                kernel32.CloseHandle(h)
+                if ok and os.path.splitext(os.path.basename(buf.value))[0].lower() in images:
+                    found.append(hwnd)
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        user32.EnumWindows(_cb, 0)
+        if not found:
+            return
+        hwnd = found[-1]
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        fg = user32.GetForegroundWindow()
+        cur = kernel32.GetCurrentThreadId()
+        oth = user32.GetWindowThreadProcessId(fg, None)
+        user32.AttachThreadInput(cur, oth, True)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.AttachThreadInput(cur, oth, False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _cmd_open(args: dict) -> dict:
-    """Open a file / folder / app / URL with the OS default handler."""
+    """Open a file / folder / app / URL with the OS default handler, then bring it to the
+    foreground (background-launched apps otherwise open hidden behind the current window)."""
+    import time
     target = args.get("target") or args.get("path") or ""
     if not target:
         return {"error": "no target"}
@@ -109,14 +180,15 @@ def _cmd_open(args: dict) -> dict:
     target = _resolve_dir(target)
     try:
         os.startfile(target)  # noqa: S606 — Windows shell-open
-        return {"opened": target}
     except Exception as exc:  # noqa: BLE001
         # Fall back to `start` for apps on PATH / protocol handlers.
         try:
             subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
-            return {"opened": target}
         except Exception as exc2:  # noqa: BLE001
             return {"error": f"{exc}; {exc2}"}
+    time.sleep(0.7)
+    _bring_to_front(target)
+    return {"opened": target}
 
 
 def _cmd_list_dir(args: dict) -> dict:
