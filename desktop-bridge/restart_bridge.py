@@ -17,8 +17,11 @@ ME = os.getpid()
 time.sleep(2)  # let the shell command that launched us return + reply first
 
 try:
+    # Match BOTH python.exe and pythonw.exe — a previous restart launched the bridge as
+    # pythonw, so a python.exe-only filter would miss it and spawn a DUPLICATE (two bridges
+    # fight over the same LiveKit identity → endless reconnect ping-pong).
     out = subprocess.run(
-        ["wmic", "process", "where", "name='python.exe'",
+        ["wmic", "process", "where", "name='python.exe' or name='pythonw.exe'",
          "get", "processid,commandline", "/format:csv"],
         capture_output=True, text=True, timeout=25,
     ).stdout
